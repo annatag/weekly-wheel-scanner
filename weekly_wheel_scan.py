@@ -92,17 +92,30 @@ def load_symbols(args: argparse.Namespace) -> list[str]:
     return sorted({s.strip().upper() for s in values if s.strip() and not s.lstrip().startswith("#")})
 
 
-def load_earnings(path: Path) -> dict[str, date]:
-    if not path.exists():
-        print(f"WARNING: {path} not found. Earnings exclusion cannot be guaranteed.", file=sys.stderr)
-        return {}
-    result: dict[str, date] = {}
-    with path.open(newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            try:
-                result[row["symbol"].strip().upper()] = date.fromisoformat(row["earnings_date"].strip())
-            except (KeyError, ValueError):
+def load_earnings(path):
+    result = {}
+
+    with open(path, newline="", encoding="utf-8") as file:
+        reader = csv.DictReader(file)
+
+        for row in reader:
+            symbol = row.get("symbol")
+            earnings_date = row.get("earnings_date")
+
+            if not symbol or not earnings_date:
                 continue
+
+            symbol = symbol.strip()
+            earnings_date = earnings_date.strip()
+
+            if not symbol or not earnings_date:
+                continue
+
+            if symbol.startswith("#"):
+                continue
+
+            result[symbol.upper()] = date.fromisoformat(earnings_date)
+
     return result
 
 
