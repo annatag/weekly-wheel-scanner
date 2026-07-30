@@ -385,7 +385,7 @@ def expiration_label(value: str) -> str:
 
 
 def money(value: float | None) -> str:
-    return "â€”" if value is None else f"${value:,.2f}"
+    return "—" if value is None else f"${value:,.2f}"
 
 
 def print_recommendations(rows: list[Recommendation]) -> None:
@@ -407,7 +407,7 @@ def print_recommendations(rows: list[Recommendation]) -> None:
                 f"{money(item.current_ask)} [{item.data_type}]"
             )
         if item.status != "SUGGESTION":
-            print(f"  WAIT â€” {item.reason}")
+            print(f"  WAIT — {item.reason}")
             continue
 
         print(

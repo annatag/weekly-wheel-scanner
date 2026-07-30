@@ -37,7 +37,7 @@ MARKET_DATA_TYPE_LABELS = {
 @dataclass(frozen=True)
 class Config:
     min_cash: float = 7_000
-    max_cash: float = 15_000
+    max_cash: float = 75_000
     min_dte: int = 7
     max_dte: int = 14
     min_abs_delta: float = 0.15
