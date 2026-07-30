@@ -80,7 +80,7 @@ class Candidate:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Scan IBKR live or delayed data for 7â€“14 DTE cash-secured puts."
+        description="Scan IBKR live or delayed data for 7-14 DTE cash-secured puts."
     )
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument(
