@@ -1,26 +1,28 @@
-# Weekly Wheel Scan — IBKR manual scanner
+# Weekly Wheel Scan â€” IBKR manual scanner
 
-A **read-only** Python scanner for cash-secured puts using market data from your running Interactive Brokers TWS or IB Gateway session. It never submits, modifies, or cancels orders.
+A **read-only** Python scanner for cash-secured puts using live or delayed
+market data from your running Interactive Brokers TWS or IB Gateway session.
+It never submits, modifies, or cancels orders.
 
 ## Your strategy encoded
 
-- Cash required: **$7,000–$15,000** per contract
-- Expiration: **7–14 calendar days**
-- Absolute put delta: **0.15–0.20**
+- Cash required: **$7,000â€“$15,000** per contract
+- Expiration: **7â€“14 calendar days**
+- Absolute put delta: **0.15â€“0.20**
 - Top **5**, or fewer when quality filters are not met
 - No earnings before expiration (using `earnings.csv`)
 - Underlying average daily volume at least 1,000,000 shares
 - Option open interest at least 250
 - Option volume at least 10
 - Bid/ask spread no wider than 10% of midpoint
-- Exclude stocks moving more than ±5% over the prior five sessions
-- Output ranked by a 0–100 Wheel Score
+- Exclude stocks moving more than Â±5% over the prior five sessions
+- Output ranked by a 0â€“100 Wheel Score
 
 ## 1. IBKR setup
 
 Install and open **Trader Workstation (TWS)** or **IB Gateway**.
 
-In TWS: **File → Global Configuration → API → Settings**
+In TWS: **File â†’ Global Configuration â†’ API â†’ Settings**
 
 - Enable **ActiveX and Socket Clients**
 - Keep **Read-Only API** enabled (recommended)
@@ -30,12 +32,14 @@ In TWS: **File → Global Configuration → API → Settings**
   - Gateway paper: usually `4002`
   - Gateway live: usually `4001`
 
-You need the appropriate U.S. stock and options market-data subscriptions in IBKR for live bid/ask and Greeks. Without them, IBKR may return delayed/frozen data or blanks.
+Live bid/ask and Greeks require the appropriate U.S. stock and options
+market-data subscriptions in IBKR. Without them, the scanner's default
+`auto` mode requests IBKR's free delayed data.
 
 ## 2. Install
 
 ```bash
-cd weekly-wheel-scan
+cd weekly-wheel-scanner
 python3 -m venv .venv
 source .venv/bin/activate       # macOS/Linux
 # .venv\Scripts\activate        # Windows PowerShell
@@ -52,21 +56,39 @@ AAPL,2026-08-06
 AMD,2026-08-04
 ```
 
-The script cannot guarantee the earnings exclusion when a symbol is absent from this file. ETFs generally do not have corporate earnings dates.
+The script cannot guarantee the earnings exclusion when a symbol is absent
+from this file. ETFs generally do not have corporate earnings dates.
 
 ## 4. Run manually
 
-Paper TWS:
+The existing command now works for both live and delayed data:
 
 ```bash
 python weekly_wheel_scan.py --port 7497 --symbols-file symbols.txt
 ```
 
-Live TWS, still read-only:
+The default `--market-data auto` asks IBKR for live data when your account has
+the required subscriptions and automatically accepts delayed data otherwise.
+
+You can also select a mode explicitly:
 
 ```bash
-python weekly_wheel_scan.py --port 7496 --symbols-file symbols.txt
+# Require live market data; missing subscriptions can produce blank quotes.
+python weekly_wheel_scan.py --port 7497 --symbols-file symbols.txt --market-data live
+
+# Allow delayed market data when live permissions are unavailable.
+python weekly_wheel_scan.py --port 7497 --symbols-file symbols.txt --market-data delayed
 ```
+
+IBKR always returns live data when you are entitled to it, even if delayed
+data was requested. The terminal's `Data` column labels each result with the
+actual type IBKR returned: `LIVE`, `DELAYED`, `FROZEN`, or `DELAYED_FROZEN`.
+The CSV records the actual types separately in `underlying_data_type` and
+`option_data_type`.
+
+The market-data selection is independent of the connection port. Use the port
+for the TWS/Gateway session you opened; use `--market-data` to control quote
+behavior.
 
 Custom tickers:
 
@@ -87,12 +109,17 @@ The score follows your weighting:
 - 15% technical support
 - 10% market conditions
 
-The current script uses a neutral market-condition score because VIX access depends on your IBKR index data permissions. This is clearly isolated in `score_candidate()` so it can be upgraded later.
+The current script uses a neutral market-condition score because VIX access
+depends on your IBKR index data permissions. This is clearly isolated in
+`score_candidate()` so it can be upgraded later.
 
 ## Important limitations
 
+- Delayed IBKR quotes are generally 15â€“20 minutes behind live quotes.
 - `earnings.csv` must be maintained manually for accurate event exclusion.
-- Open interest and volume availability depends on IBKR permissions and the time of day.
+- Open interest and volume availability depends on IBKR permissions and the
+  time of day.
 - Snapshot values can change immediately after the scan.
-- Assignment probability is not a guaranteed probability; absolute delta is only a rough market-implied proxy.
+- Assignment probability is not guaranteed; absolute delta is only a rough
+  market-implied proxy.
 - Always verify the contract in TWS before submitting an order.
