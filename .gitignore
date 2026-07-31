@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+.earnings_cache.json
+wheel_scan_results.csv
+wheel_trade_suggestions.csv
