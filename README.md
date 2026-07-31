@@ -1,125 +1,178 @@
-# Weekly Wheel Scan â€” IBKR manual scanner
+# Weekly Wheel Scan
 
-A **read-only** Python scanner for cash-secured puts using live or delayed
-market data from your running Interactive Brokers TWS or IB Gateway session.
-It never submits, modifies, or cancels orders.
-
-## Your strategy encoded
-
-- Cash required: **$7,000â€“$15,000** per contract
-- Expiration: **7â€“14 calendar days**
-- Absolute put delta: **0.15â€“0.20**
-- Top **5**, or fewer when quality filters are not met
-- No earnings before expiration (using `earnings.csv`)
-- Underlying average daily volume at least 1,000,000 shares
-- Option open interest at least 250
-- Option volume at least 10
-- Bid/ask spread no wider than 10% of midpoint
-- Exclude stocks moving more than Â±5% over the prior five sessions
-- Output ranked by a 0â€“100 Wheel Score
-
-## 1. IBKR setup
-
-Install and open **Trader Workstation (TWS)** or **IB Gateway**.
-
-In TWS: **File â†’ Global Configuration â†’ API â†’ Settings**
-
-- Enable **ActiveX and Socket Clients**
-- Keep **Read-Only API** enabled (recommended)
-- Note the socket port
-  - TWS paper: usually `7497`
-  - TWS live: usually `7496`
-  - Gateway paper: usually `4002`
-  - Gateway live: usually `4001`
-
-Live bid/ask and Greeks require the appropriate U.S. stock and options
-market-data subscriptions in IBKR. Without them, the scanner's default
-`auto` mode requests IBKR's free delayed data.
-
-## 2. Install
+Read-only tooling for selling cash-secured puts and covered calls. It ranks a
+universe of tickers, then tells you which strike, which expiry and what limit
+price to use. **It never places, modifies or cancels an order.**
 
 ```bash
-cd weekly-wheel-scanner
+python weekly_wheel_scan.py                 # rank the best puts to sell this week
+python wheel_advise.py INTC                 # deep-dive one ticker: strike, expiry, price
+python wheel_trade_suggestions.py           # re-quote a saved scan before you trade
+```
+
+## Setup
+
+```bash
 python3 -m venv .venv
-source .venv/bin/activate       # macOS/Linux
-# .venv\Scripts\activate        # Windows PowerShell
+source .venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env        # then paste your Alpaca keys into .env
 ```
 
-## 3. Update earnings dates
+Data comes from Alpaca's free tier by default: daily bars from IEX and option
+quotes from the `indicative` feed. No paid subscription is required. `.env` is
+gitignored.
 
-Before every scan, update `earnings.csv`:
+Run the offline test suite with `python -m unittest test_wheelkit`.
 
-```csv
-symbol,earnings_date
-AAPL,2026-08-06
-AMD,2026-08-04
-```
+## The three commands
 
-The script cannot guarantee the earnings exclusion when a symbol is absent
-from this file. ETFs generally do not have corporate earnings dates.
+### `weekly_wheel_scan.py` — what to sell
 
-## 4. Run manually
-
-The existing command now works for both live and delayed data:
+Ranks every ticker in `symbols.txt` and prints a table plus a full trade card
+for each pick.
 
 ```bash
-python weekly_wheel_scan.py --port 7497 --symbols-file symbols.txt
+python weekly_wheel_scan.py --top 5
+python weekly_wheel_scan.py --right call            # covered calls on shares you hold
+python weekly_wheel_scan.py --symbols SOFI,INTC,F --min-dte 7 --max-dte 14
+python weekly_wheel_scan.py --require-uptrend       # only names above their 50-day
 ```
 
-The default `--market-data auto` asks IBKR for live data when your account has
-the required subscriptions and automatically accepts delayed data otherwise.
+Results are written to `wheel_scan_results.csv`, including every sub-score so
+you can see *why* something ranked where it did.
 
-You can also select a mode explicitly:
+### `wheel_advise.py` — how to sell it
+
+For a ticker you have already chosen. Prints three things:
+
+1. **Duration table** — the best strike near your target delta at *each* expiry,
+   so you can see which holding period actually pays. Annualised return is
+   frequently much better at 7 days than at 35.
+2. **Strike ladder** — the risk/reward trade-off across strikes for the best
+   expiry, from 0.10 to 0.30 delta.
+3. **Recommendation** — one contract, fully costed, with the limit ladder.
 
 ```bash
-# Require live market data; missing subscriptions can produce blank quotes.
-python weekly_wheel_scan.py --port 7497 --symbols-file symbols.txt --market-data live
-
-# Allow delayed market data when live permissions are unavailable.
-python weekly_wheel_scan.py --port 7497 --symbols-file symbols.txt --market-data delayed
+python wheel_advise.py INTC
+python wheel_advise.py MU --right call --shares 300 --cost-basis 80
+python wheel_advise.py SOFI --max-dte 45 --target-delta 0.25 --capital 10000
 ```
 
-IBKR always returns live data when you are entitled to it, even if delayed
-data was requested. The terminal's `Data` column labels each result with the
-actual type IBKR returned: `LIVE`, `DELAYED`, `FROZEN`, or `DELAYED_FROZEN`.
-The CSV records the actual types separately in `underlying_data_type` and
-`option_data_type`.
+The advisor deliberately runs looser filters than the scanner. You named the
+ticker, so it shows you the menu rather than returning an empty screen.
 
-The market-data selection is independent of the connection port. Use the port
-for the TWS/Gateway session you opened; use `--market-data` to control quote
-behavior.
+### `wheel_trade_suggestions.py` — is it still good?
 
-Custom tickers:
+Re-quotes the saved scan against the current market and reprices the limits.
+Option quotes move far more than the underlying, so run this immediately before
+trading. Contracts that no longer pass the spread check are marked `WAIT`, and
+the original position size is preserved.
 
-```bash
-python weekly_wheel_scan.py --symbols AAPL,AMD,QQQ,SPY,UBER --top 5
+## Reading a trade card
+
+```
+  PRICE      Open at  $1.52  limit credit  → $152 total
+             Likely   $1.48  (the mid)      → $148 total
+             Floor    $1.46  do not go below → $146 total
 ```
 
-Results print in the terminal and save to `wheel_scan_results.csv`.
+Work the order down this ladder. Start near the ask, walk toward the mid, and
+cancel rather than sell below the floor.
 
-## Wheel Score
+```
+  BREAKEVEN  $80.52 (+12.4% from $91.97 spot, 0.87σ of the expected move)
+  ODDS       81% chance of profit · 23% chance of assignment
+  VOL        IV 103.6% vs realised 65.9% → VRP 1.53  (rich premium)
+```
 
-The score follows your weighting:
+`σ` is the cushion measured in standard deviations of the expected move — the
+honest way to compare a $5 cushion on a calm stock against $5 on a volatile
+one. `VRP` is the variance risk premium: implied volatility divided by what the
+stock has actually been doing. Above ~1.15 you are being paid a real premium;
+below 1.0 you are selling volatility for less than the stock is realising,
+which is a losing trade however tempting the headline yield looks.
 
-- 25% underlying quality/liquidity proxy
-- 20% premium relative to risk
-- 15% options liquidity
-- 15% implied-volatility attractiveness
-- 15% technical support
-- 10% market conditions
+```
+  EXIT       Buy to close at $0.74 (50% of max profit, $90 locked in)
+             Roll or close by Aug 04 (3 DTE) rather than holding into expiry
+```
 
-The current script uses a neutral market-condition score because VIX access
-depends on your IBKR index data permissions. This is clearly isolated in
-`score_candidate()` so it can be upgraded later.
+## How candidates are scored
 
-## Important limitations
+| Weight | Component | What it measures |
+|--------|-----------|------------------|
+| 25% | Premium | Annualised return **in excess of the risk-free rate** |
+| 25% | IV edge | Variance risk premium (implied ÷ realised) |
+| 20% | Safety | Cushion in σ, trend, distance from the ideal delta |
+| 15% | Liquidity | Bid/ask spread, quote size, option volume |
+| 10% | Quality | Average dollar volume, log-scaled |
+| 5%  | Regime | SPY volatility and trend |
 
-- Delayed IBKR quotes are generally 15â€“20 minutes behind live quotes.
-- `earnings.csv` must be maintained manually for accurate event exclusion.
-- Open interest and volume availability depends on IBKR permissions and the
-  time of day.
-- Snapshot values can change immediately after the scan.
-- Assignment probability is not guaranteed; absolute delta is only a rough
-  market-implied proxy.
-- Always verify the contract in TWS before submitting an order.
+Adjust the weights in `WheelConfig.weights` in `wheelkit/strategy.py`.
+
+## What changed from version 1, and why
+
+The previous version returned zero rows. Two independent causes:
+
+1. **No IBKR market-data entitlement.** Every quote returned error 10089 and
+   `reqHistoricalData` timed out, so every symbol failed before reaching the
+   option chain.
+2. **A dead Yahoo fallback.** This Python build ships without a CA bundle, so
+   every HTTPS call raised `SSLCertVerificationError` — which the fallback
+   caught as a generic `OSError` and turned into a silent "no data". Network
+   calls now build their context from `certifi` and fail loudly.
+
+Correctness fixes beyond the data layer:
+
+- **Cheap stocks were silently excluded.** A `$7,000` cash floor became a
+  `$70` minimum strike, so SOFI, F, INTC and T could never appear regardless
+  of fit. Sizing now fills the sleeve with multiple contracts.
+- **The top five could be five strikes on one ticker.** Ranking now takes one
+  contract per symbol by default (`--allow-duplicate-symbols` to opt out).
+- **The earnings filter never fired.** It depended on a hand-maintained
+  `earnings.csv` that shipped empty. Dates now come from the Nasdaq calendar,
+  cached for 12 hours, with the CSV kept as an override.
+- **Config contradicted the README** — documented `$7k–$15k`, actually used
+  `$7k–$50k`.
+
+Scoring changes:
+
+- IV was scored on an **absolute** scale, so the same high-beta names won every
+  week whether or not their options were expensive *that* week. Now scored
+  relative to realised volatility.
+- Premium was scored on **raw** annualised return, making a 6% return on fully
+  secured cash look attractive while T-bills paid 4% for none of the risk. Now
+  scored on the excess.
+- Downside cushion was scored in **raw dollars** (`cushion * 1000`), which
+  cannot distinguish a generous cushion from a meaningless one. Now measured in
+  standard deviations of the expected move.
+- The quality term (`45 + 12 * log10(...)`) compressed every liquid name into a
+  ~2-point band, so a quarter of the total weight did no ranking work at all.
+- Market conditions were the hard-coded constant `60`. Now derived from SPY.
+
+Greeks and implied volatility are **computed** from the quoted mid via
+Black-Scholes rather than taken from a vendor, because the free tier does not
+supply them. The test suite verifies this against put-call parity, finite-
+difference deltas and one-day decay.
+
+## Limitations
+
+- **Open interest is unavailable** on the free Alpaca tier, so liquidity is
+  gated on spread, quote size and volume instead. Do not read its absence as a
+  pass.
+- **Quotes outside market hours are the previous close.** Spreads look far
+  wider than they trade, and the trade card labels this.
+- **The earnings calendar only covers scheduled reports.** A contract can carry
+  a catalyst the calendar does not list — litigation, FDA, M&A. Implied
+  volatility above 80% triggers a warning for exactly this reason; investigate
+  before assuming rich premium is free money.
+- **Probabilities are risk-neutral**, derived from the option's own implied
+  volatility. They are not forecasts, and `P(profit)` reads higher than
+  realised win rates because it ignores intra-period breaches you would close.
+- **Black-Scholes assumes European exercise**; these are American options. The
+  difference is immaterial for the short-dated out-of-the-money contracts the
+  wheel sells, and material for deep in-the-money ones, which it does not.
+- Dividends are not modelled. Early assignment risk on a short call rises
+  sharply around an ex-dividend date.
+- Always confirm the contract and the live quote in your broker before selling.
