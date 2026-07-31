@@ -1,3 +1,3 @@
+# Optional overrides. Dates are fetched from the Nasdaq calendar automatically;
+# anything listed here wins. Useful when the feed is wrong or missing a name.
 symbol,earnings_date
-# Update this file before each scan. Example:
-# AAPL,2026-08-06
