@@ -1,28 +1,36 @@
-# One ticker per line. Remove names you would not be comfortable owning.
-AAPL
+# One ticker per line. Only names you would be happy to own at the strike.
+# Sized for a $3,000-$15,000 sleeve, so single contracts need a sub-$150 price;
+# cheaper names are filled with multiple contracts automatically.
+AAL
 AMD
-AMZN
 BAC
 C
-DIS
+CCL
+CSCO
+CVX
+DAL
+F
 GDX
-GOOGL
+GM
+GOLD
 HOOD
 INTC
 IWM
-JPM
-META
-MSFT
+KO
+MARA
 MU
-NVDA
+NKE
+PFE
 PLTR
 PYPL
 QCOM
-QQQ
-SHOP
+RIVN
+SLV
 SOFI
-SPY
 T
-TSLA
 UBER
+VZ
+WFC
+X
 XLF
+XOM
