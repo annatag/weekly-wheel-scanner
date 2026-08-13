@@ -136,7 +136,17 @@ def _parse_ts(value: object) -> datetime | None:
 
 
 class AlpacaProvider:
-    """Free-tier Alpaca. Options use the `indicative` feed; stocks use IEX."""
+    """Free-tier Alpaca.
+
+    The free tier splits by recency, not by product: delayed *historical* SIP
+    data is included, while real-time SIP quotes are not. So bars come from
+    `sip` (full consolidated volume) and live snapshots from `iex`.
+
+    The distinction matters for any volume threshold. IEX prints roughly 3% of
+    consolidated volume, so screening on IEX bars silently applied a limit
+    about thirty times tighter than intended, and ranked names by their IEX
+    share rather than by real liquidity.
+    """
 
     name = "alpaca"
 
@@ -146,7 +156,8 @@ class AlpacaProvider:
         secret_key: str | None = None,
         *,
         option_feed: str = "indicative",
-        stock_feed: str = "iex",
+        bar_feed: str = "sip",
+        quote_feed: str = "iex",
     ) -> None:
         load_dotenv()
         self.key_id = key_id or os.environ.get("ALPACA_API_KEY_ID", "")
@@ -158,7 +169,8 @@ class AlpacaProvider:
                 "next to this repository (see .env.example)."
             )
         self.option_feed = option_feed
-        self.stock_feed = stock_feed
+        self.bar_feed = bar_feed
+        self.quote_feed = quote_feed
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -178,7 +190,7 @@ class AlpacaProvider:
                     "timeframe": "1Day",
                     "start": start,
                     "adjustment": "split",
-                    "feed": self.stock_feed,
+                    "feed": self.bar_feed,
                     "limit": 10000,
                     "page_token": page_token,
                 },
@@ -211,7 +223,7 @@ class AlpacaProvider:
         """
         payload = get_json(
             f"{ALPACA_DATA_URL}/v2/stocks/{symbol}/snapshot",
-            params={"feed": self.stock_feed},
+            params={"feed": self.quote_feed},
             headers=self._headers,
         )
         quote = payload.get("latestQuote") or {}

@@ -60,7 +60,10 @@ class WheelConfig:
     min_credit_per_share: float = 0.15
 
     # Underlying quality.
-    min_avg_dollar_volume: float = 20_000_000
+    # Consolidated (SIP) dollar volume. This was 20M when bars came from IEX,
+    # which prints ~3% of consolidated volume, so it screened at roughly $600M
+    # real. Restated against the true figure to keep the original intent.
+    min_avg_dollar_volume: float = 50_000_000
     max_abs_move_5d: float = 0.15
     require_above_sma50: bool = False
 
