@@ -48,6 +48,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--earnings-file", type=Path, default=Path("earnings.csv"))
     p.add_argument("--output", type=Path, default=Path("wheel_scan_results.csv"))
     p.add_argument("--top", type=int, default=5)
+    p.add_argument(
+        "--sort", choices=("score", "return", "credit"), default="score",
+        help="score = risk-adjusted rank; return = highest annualised; "
+             "credit = largest dollar premium",
+    )
 
     p.add_argument("--min-cash", type=float, default=3_000)
     p.add_argument("--max-cash", type=float, default=15_000)
@@ -59,7 +64,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-vrp", type=float, default=1.0,
                    help="Minimum implied/realised volatility ratio")
     p.add_argument("--min-annualised", type=float, default=0.12)
-    p.add_argument("--min-dollar-volume", type=float, default=20_000_000)
+    p.add_argument("--min-dollar-volume", type=float, default=50_000_000)
 
     p.add_argument("--allow-earnings", action="store_true",
                    help="Do not exclude expiries that span an earnings report")
@@ -104,6 +109,7 @@ def main() -> int:
         require_above_sma50=args.require_uptrend,
         top_n=args.top,
         one_per_symbol=not args.allow_duplicate_symbols,
+        sort_by=args.sort,
     )
 
     try:
