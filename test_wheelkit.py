@@ -10,9 +10,22 @@ from __future__ import annotations
 
 import math
 import unittest
+from dataclasses import replace
 from datetime import date
 
-from wheelkit.analytics import compute_stats, variance_risk_premium
+from wheelkit.analytics import (
+    FALLING_KNIFE,
+    MOMENTUM,
+    PULLBACK,
+    REBOUND,
+    UNKNOWN,
+    _trend_score,
+    classify_setup,
+    setup_score,
+    compute_stats,
+    variance_risk_premium,
+)
+from wheelkit.finviz import ScreenRow, _ScreenerParser, parse_filters
 from wheelkit.orders import build_limit_plan, build_management_plan, round_to_tick, tick_size
 from wheelkit.pricing import (
     black_scholes_price,
@@ -25,10 +38,12 @@ from wheelkit.strategy import (
     Candidate,
     WheelConfig,
     build_candidates,
+    fundamentals_pass,
     rank,
     resize_candidate,
     score_candidate,
     size_position,
+    underlying_passes,
 )
 
 R = 0.04
@@ -238,6 +253,163 @@ class TestStrategy(unittest.TestCase):
         )
         self.assertEqual(len(without), 1)
         self.assertEqual(len(with_event), 0)
+
+
+class TestSetupClassification(unittest.TestCase):
+    def test_two_by_two(self):
+        self.assertEqual(classify_setup(0.15, -0.06), PULLBACK)
+        self.assertEqual(classify_setup(0.15, 0.06), MOMENTUM)
+        self.assertEqual(classify_setup(-0.15, 0.06), REBOUND)
+        self.assertEqual(classify_setup(-0.15, -0.06), FALLING_KNIFE)
+
+    def test_missing_history_is_unknown(self):
+        nan = float("nan")
+        self.assertEqual(classify_setup(nan, -0.06), UNKNOWN)
+        self.assertEqual(classify_setup(0.15, nan), UNKNOWN)
+
+    def test_setup_ranks_pullback_highest_and_knife_lowest(self):
+        # The previous model subtracted move_20d * 100, so the dip alone made
+        # a pullback score below an otherwise identical momentum name.
+        self.assertGreater(setup_score(PULLBACK), setup_score(MOMENTUM))
+        self.assertGreater(setup_score(MOMENTUM), setup_score(REBOUND))
+        self.assertGreater(setup_score(REBOUND), setup_score(FALLING_KNIFE))
+        self.assertEqual(setup_score(UNKNOWN), 50.0)
+
+    def test_trend_score_measures_structure_only(self):
+        # Setup carries its own weight now, so trend must not double-count it.
+        strong = _trend_score(spot=110.0, sma20=105.0, sma50=100.0, sma200=90.0)
+        weak = _trend_score(spot=80.0, sma20=105.0, sma50=100.0, sma200=90.0)
+        self.assertGreater(strong, weak)
+
+    def test_setup_actually_moves_the_final_score(self):
+        # Buried inside safety this whole range moved the total under 2 points.
+        cfg = WheelConfig()
+        pull = _candidate(setup=PULLBACK)
+        knife = _candidate(setup=FALLING_KNIFE)
+        score_candidate(pull, cfg, 50.0)
+        score_candidate(knife, cfg, 50.0)
+        self.assertGreater(pull.score - knife.score, 10.0)
+
+    def test_quarter_move_uses_63_sessions(self):
+        bars = [
+            Bar(date(2026, 1, 1), 100 + i, 101 + i, 99 + i, 100 + i, 5_000_000)
+            for i in range(120)
+        ]
+        stats = compute_stats(bars, 220.0)
+        self.assertEqual(stats.setup, MOMENTUM)  # rising on both horizons
+        self.assertAlmostEqual(stats.move_quarter, 220.0 / bars[-64].close - 1, places=9)
+
+
+class TestFundamentalsGate(unittest.TestCase):
+    DATA = {
+        "AIG": {"pe": 13.93, "peg": 0.85},
+        "VRSK": {"pe": 28.57, "peg": 1.97},
+        "RICH": {"pe": 45.0, "peg": 1.0},
+        "GROWTHY": {"pe": 20.0, "peg": 3.5},
+        "ETF": {"pe": None, "peg": None},
+        "LOSSMAKER": {"pe": -5.0, "peg": None},
+    }
+
+    def test_gate_is_off_unless_configured(self):
+        self.assertIsNone(fundamentals_pass("RICH", self.DATA, WheelConfig()))
+
+    def test_rejects_on_pe_and_peg(self):
+        cfg = WheelConfig(max_pe=30, max_peg=2.0)
+        self.assertIsNone(fundamentals_pass("AIG", self.DATA, cfg))
+        self.assertIsNone(fundamentals_pass("VRSK", self.DATA, cfg))
+        self.assertIsNotNone(fundamentals_pass("RICH", self.DATA, cfg))
+        self.assertIsNotNone(fundamentals_pass("GROWTHY", self.DATA, cfg))
+
+    def test_unprofitable_is_always_rejected(self):
+        cfg = WheelConfig(max_pe=30)
+        self.assertIn("unprofitable", fundamentals_pass("LOSSMAKER", self.DATA, cfg))
+
+    def test_etfs_pass_unless_fundamentals_required(self):
+        lenient = WheelConfig(max_pe=30, max_peg=2.0)
+        strict = WheelConfig(max_pe=30, max_peg=2.0, require_fundamentals=True)
+        self.assertIsNone(fundamentals_pass("ETF", self.DATA, lenient))
+        self.assertIsNotNone(fundamentals_pass("ETF", self.DATA, strict))
+        self.assertIsNotNone(fundamentals_pass("NOTLISTED", self.DATA, strict))
+
+
+class TestFinvizParsing(unittest.TestCase):
+    HTML = """
+    <table><thead>
+      <th class="table-header">No.</th><th class="table-header">Ticker</th>
+      <th class="table-header">Market Cap</th><th class="table-header">P/E</th>
+      <th class="table-header">PEG</th><th class="table-header">Price</th>
+    </thead>
+    <tr class="styled-row is-striped" valign="top">
+      <td>1</td>
+      <td data-boxover-ticker="AIG" data-boxover-company="American Intl"><a>AAIG</a></td>
+      <td>39.76B</td><td>13.93</td><td>0.85</td><td>76.03</td>
+    </tr>
+    <tr class="styled-row is-striped" valign="top">
+      <td>2</td>
+      <td data-boxover-ticker="GS" data-boxover-company="Goldman"><a>GGS</a></td>
+      <td>303.58B</td><td>16.09</td><td>-</td><td>1042.63</td>
+    </tr>
+    </table>"""
+
+    def _rows(self):
+        parser = _ScreenerParser()
+        parser.feed(self.HTML)
+        return parser
+
+    def test_ticker_comes_from_the_attribute_not_the_cell_text(self):
+        # The logo's alt text runs into the cell, rendering "AAIG" for AIG.
+        parser = self._rows()
+        self.assertEqual([t for t, _ in parser.rows], ["AIG", "GS"])
+
+    def test_rows_align_with_their_own_tickers(self):
+        parser = self._rows()
+        headers = parser.headers
+        rows = {t: ScreenRow(t, dict(zip(headers, cells))) for t, cells in parser.rows}
+        self.assertAlmostEqual(rows["AIG"].number("P/E"), 13.93)
+        self.assertAlmostEqual(rows["AIG"].number("Price"), 76.03)
+        self.assertAlmostEqual(rows["GS"].number("P/E"), 16.09)
+        self.assertAlmostEqual(rows["GS"].number("Price"), 1042.63)
+
+    def test_number_parsing(self):
+        row = ScreenRow("X", {"cap": "39.76B", "vol": "2,132,694", "chg": "2.83%",
+                              "missing": "-", "na": "N/A"})
+        self.assertAlmostEqual(row.number("cap"), 39.76e9)
+        self.assertAlmostEqual(row.number("vol"), 2132694)
+        self.assertAlmostEqual(row.number("chg"), 2.83)
+        self.assertIsNone(row.number("missing"))
+        self.assertIsNone(row.number("na"))
+        self.assertIsNone(row.number("absent"))
+
+    def test_parse_filters(self):
+        url = ("https://finviz.com/screener.ashx?v=121&f=fa_pe_u30,fa_peg_u2,"
+               "ta_perf_13wup&o=ticker")
+        self.assertEqual(parse_filters(url), "fa_pe_u30,fa_peg_u2,ta_perf_13wup")
+        with self.assertRaises(ValueError):
+            parse_filters("https://finviz.com/screener.ashx?v=121")
+
+
+class TestTrendGate(unittest.TestCase):
+    def _stats(self, quarter: float, month: float):
+        bars = [Bar(date(2026, 1, 1), 100, 101, 99, 100, 9_000_000) for _ in range(120)]
+        stats = compute_stats(bars, 100.0)
+        return replace(stats, move_quarter=quarter, move_20d=month,
+                       setup=classify_setup(quarter, month))
+
+    def test_falling_knife_excluded_by_default(self):
+        cfg = WheelConfig(min_avg_dollar_volume=0)
+        self.assertIsNotNone(underlying_passes(self._stats(-0.2, -0.1), cfg, "P"))
+        self.assertIsNone(underlying_passes(self._stats(0.2, -0.05), cfg, "P"))
+
+    def test_require_pullback_rejects_momentum(self):
+        cfg = WheelConfig(min_avg_dollar_volume=0, require_pullback=True)
+        self.assertIsNone(underlying_passes(self._stats(0.2, -0.05), cfg, "P"))
+        self.assertIsNotNone(underlying_passes(self._stats(0.2, 0.05), cfg, "P"))
+
+    def test_trend_gates_do_not_apply_to_covered_calls(self):
+        # A covered call is written against shares already held; the entry
+        # decision was made long ago.
+        cfg = WheelConfig(min_avg_dollar_volume=0, require_pullback=True)
+        self.assertIsNone(underlying_passes(self._stats(-0.2, -0.1), cfg, "C"))
 
 
 def _candidate(**overrides) -> Candidate:

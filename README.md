@@ -26,6 +26,45 @@ subscription is required. `.env` is gitignored.
 
 Run the offline test suite with `python -m unittest test_wheelkit`.
 
+## Screening the business as well as the option
+
+This scanner screens the **option**: implied volatility, spread, assignment
+odds. It has no view on whether the underlying is a business worth owning,
+which matters because assignment means holding the shares.
+
+Point it at a Finviz screen to supply both the universe and the fundamentals:
+
+```bash
+python weekly_wheel_scan.py \
+  --finviz-url "https://finviz.com/screener.ashx?v=121&f=fa_pe_u30,fa_peg_u2,sh_price_o50,ta_perf_13wup,ta_perf2_4wdown" \
+  --max-pe 30 --max-peg 2.0
+```
+
+Use the **valuation view (`v=121`)** — it carries PEG, which the overview view
+does not. Finviz decides which stocks qualify; everything downstream is
+unchanged. Expect few survivors: the two screens pull in opposite directions,
+because a low P/E and a stable PEG describe exactly the businesses whose
+options are cheapest.
+
+This is meant for a handful of page loads when you rebuild the universe, not
+a per-symbol API. Finviz rate-limits aggressively and reserves bulk access for
+Elite subscribers, who get a proper CSV export.
+
+### Trend setups
+
+The quarter sets the direction and the month says where price sits within it:
+
+| Setup | Quarter | Month | Meaning |
+|---|---|---|---|
+| **pullback** | up | down | Uptrend intact, dip in progress — the setup a put seller wants |
+| momentum | up | up | Healthy but extended, and volatility is usually cheap |
+| rebound | down | up | Bouncing inside a downtrend |
+| falling knife | down | down | Excluded by default |
+
+`--require-pullback` restricts the scan to the first row. Falling knives are
+dropped unless you pass `--allow-falling-knife`. Both gates apply only to
+puts; a covered call is written against shares you already hold.
+
 ## The four commands
 
 ### `build_universe.py` — what to scan
