@@ -71,7 +71,11 @@ puts; a covered call is written against shares you already hold.
 
 Pulls every optionable US equity from Alpaca, screens on price and real
 consolidated dollar volume, drops leveraged and inverse products, and writes
-the survivors to `symbols.txt`. Run it weekly or monthly, not daily.
+the survivors to `universe/symbols.txt`. Run it weekly or monthly, not daily.
+
+**You do not have to run it first.** The scanner builds the universe itself
+when the file is missing. Run this directly only to rebuild on demand or to
+change the screen.
 
 ```bash
 python build_universe.py                            # top 250 by liquidity
@@ -83,8 +87,16 @@ python build_universe.py --max-price 250 --max-symbols 400
 contract secures 100 shares. Leave it aligned with the scanner's `--max-cash`
 or the scan will keep rejecting names the universe just admitted.
 
-`symbols.txt` is generated output and is gitignored. Without it the scanner
-falls back to a small built-in list, so a fresh clone still runs.
+The universe lives in `universe/`, which is gitignored. It sits in its own
+directory rather than the repository root because a branch checkout that
+changes whether the file is tracked will otherwise delete it — which is
+exactly what happened once, after which the scanner silently fell back to its
+33 built-in tickers and reported a whole session of results as though it had
+screened the full list.
+
+That fallback is now loud. If the universe cannot be read or built, the scan
+prints a warning naming the exact rebuild command before it runs, and
+`--no-auto-build` disables the automatic rebuild entirely.
 
 ### `weekly_wheel_scan.py` — what to sell
 

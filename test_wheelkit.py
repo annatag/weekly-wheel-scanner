@@ -8,10 +8,16 @@ No network access: everything here is deterministic. Run with
 
 from __future__ import annotations
 
+import argparse
+import contextlib
+import io
 import math
+import shutil
+import tempfile
 import unittest
 from dataclasses import replace
 from datetime import date
+from pathlib import Path
 
 from wheelkit.analytics import (
     FALLING_KNIFE,
@@ -26,6 +32,8 @@ from wheelkit.analytics import (
     variance_risk_premium,
 )
 from wheelkit.finviz import ScreenRow, _ScreenerParser, parse_filters
+from wheelkit.universe import read_symbols_file
+from weekly_wheel_scan import DEFAULT_SYMBOLS, load_symbols
 from wheelkit.orders import build_limit_plan, build_management_plan, round_to_tick, tick_size
 from wheelkit.pricing import (
     black_scholes_price,
@@ -410,6 +418,67 @@ class TestTrendGate(unittest.TestCase):
         # decision was made long ago.
         cfg = WheelConfig(min_avg_dollar_volume=0, require_pullback=True)
         self.assertIsNone(underlying_passes(self._stats(-0.2, -0.1), cfg, "C"))
+
+
+class TestUniverseLoading(unittest.TestCase):
+    """The scanner must never quietly scan the wrong universe."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.path = Path(self.tmp) / "universe" / "symbols.txt"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _args(self, **kw):
+        base = dict(symbols=None, symbols_file=self.path, no_auto_build=True)
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def _write(self, text: str):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(text, encoding="utf-8")
+
+    def test_reads_the_universe_file(self):
+        self._write("# a comment\n\nAAPL\nmsft\n  INTC  \n")
+        self.assertEqual(load_symbols(self._args()), ["AAPL", "INTC", "MSFT"])
+
+    def test_explicit_symbols_win(self):
+        self._write("AAPL\n")
+        self.assertEqual(load_symbols(self._args(symbols="f,sofi")), ["F", "SOFI"])
+
+    def test_missing_file_warns_before_falling_back(self):
+        # Silently scanning 33 built-ins once produced a whole session of
+        # conclusions drawn as though the full universe had been screened.
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            symbols = load_symbols(self._args())
+        message = stderr.getvalue()
+        self.assertEqual(symbols, sorted(DEFAULT_SYMBOLS))
+        self.assertIn("WARNING", message)
+        self.assertIn("build_universe.py", message)
+
+    def test_warning_names_the_command_for_a_custom_path(self):
+        stderr = io.StringIO()
+        custom = Path(self.tmp) / "my" / "list.txt"
+        with contextlib.redirect_stderr(stderr):
+            load_symbols(self._args(symbols_file=custom))
+        self.assertIn(f"--output {custom}", stderr.getvalue())
+
+    def test_a_comments_only_file_counts_as_empty(self):
+        self._write("# generated\n# nothing here\n")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            symbols = load_symbols(self._args())
+        self.assertEqual(symbols, sorted(DEFAULT_SYMBOLS))
+        self.assertIn("WARNING", stderr.getvalue())
+
+    def test_read_symbols_file_ignores_comments_and_blanks(self):
+        self._write("# header\n\nGDX\n\n# mid\nslv\n")
+        self.assertEqual(read_symbols_file(self.path), ["GDX", "SLV"])
+
+    def test_read_symbols_file_missing_returns_empty(self):
+        self.assertEqual(read_symbols_file(Path(self.tmp) / "nope.txt"), [])
 
 
 def _candidate(**overrides) -> Candidate:
