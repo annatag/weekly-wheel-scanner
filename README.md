@@ -19,13 +19,33 @@ pip install -r requirements.txt
 cp .env.example .env        # then paste your Alpaca keys into .env
 ```
 
-Data comes from Alpaca's free tier by default: daily bars from IEX and option
-quotes from the `indicative` feed. No paid subscription is required. `.env` is
-gitignored.
+Data comes from Alpaca's free tier by default. The tier splits by recency
+rather than by product, so daily bars use `sip` (full consolidated volume)
+while live quotes use `iex`, and options use the `indicative` feed. No paid
+subscription is required. `.env` is gitignored.
 
 Run the offline test suite with `python -m unittest test_wheelkit`.
 
-## The three commands
+## The four commands
+
+### `build_universe.py` — what to scan
+
+Pulls every optionable US equity from Alpaca, screens on price and real
+consolidated dollar volume, drops leveraged and inverse products, and writes
+the survivors to `symbols.txt`. Run it weekly or monthly, not daily.
+
+```bash
+python build_universe.py                            # top 250 by liquidity
+python build_universe.py --dry-run                  # preview without writing
+python build_universe.py --max-price 250 --max-symbols 400
+```
+
+`--max-price` is your per-position cash ceiling divided by 100, since one
+contract secures 100 shares. Leave it aligned with the scanner's `--max-cash`
+or the scan will keep rejecting names the universe just admitted.
+
+`symbols.txt` is generated output and is gitignored. Without it the scanner
+falls back to a small built-in list, so a fresh clone still runs.
 
 ### `weekly_wheel_scan.py` — what to sell
 
