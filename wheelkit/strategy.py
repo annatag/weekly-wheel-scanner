@@ -23,7 +23,13 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date
 
-from .analytics import UnderlyingStats, variance_risk_premium
+from .analytics import (
+    FALLING_KNIFE,
+    PULLBACK,
+    UnderlyingStats,
+    setup_score,
+    variance_risk_premium,
+)
 from .pricing import compute_greeks, expected_move, implied_vol
 from .providers import Quote
 
@@ -67,6 +73,18 @@ class WheelConfig:
     max_abs_move_5d: float = 0.15
     require_above_sma50: bool = False
 
+    # Trend setup. "pullback" is quarter-up with the month down: the uptrend
+    # still supports the strike while the dip has richened the premium.
+    require_pullback: bool = False
+    exclude_falling_knife: bool = True
+
+    # Ownership gate. Assignment means holding the shares, so the business has
+    # to be one worth holding. Both are None unless fundamentals are supplied,
+    # because the data is optional and ETFs have neither.
+    max_pe: float | None = None
+    max_peg: float | None = None
+    require_fundamentals: bool = False
+
     # Edge. Selling volatility below what the stock actually realises is a
     # negative-expectancy trade regardless of how the premium looks.
     min_vrp: float = 1.0
@@ -86,12 +104,13 @@ class WheelConfig:
 
     weights: dict[str, float] = field(
         default_factory=lambda: {
-            "premium": 25.0,
-            "iv_edge": 25.0,
-            "safety": 20.0,
-            "liquidity": 15.0,
-            "quality": 10.0,
-            "regime": 5.0,
+            "premium": 22.0,
+            "iv_edge": 22.0,
+            "safety": 18.0,
+            "setup": 14.0,
+            "liquidity": 12.0,
+            "quality": 8.0,
+            "regime": 4.0,
         }
     )
 
@@ -136,6 +155,12 @@ class Candidate:
     support_20d: float
     earnings_date: date | None
     quote_age_note: str
+
+    setup: str = "unknown"
+    move_quarter: float = float("nan")
+    move_month: float = float("nan")
+    pe: float | None = None
+    peg: float | None = None
 
     score: float = 0.0
     subscores: dict[str, float] = field(default_factory=dict)
@@ -248,6 +273,7 @@ def score_candidate(candidate: Candidate, cfg: WheelConfig, regime: float) -> Ca
         "premium": score_premium(candidate, cfg),
         "iv_edge": score_iv_edge(candidate),
         "safety": score_safety(candidate, cfg),
+        "setup": setup_score(candidate.setup),
         "liquidity": score_liquidity(candidate, cfg),
         "quality": score_quality(candidate),
         "regime": regime,
@@ -309,6 +335,7 @@ def build_candidates(
     shares_held: float = 0.0,
     cost_basis: float = 0.0,
     stats_counter: Counter[str] | None = None,
+    fundamentals: dict[str, float | None] | None = None,
 ) -> list[Candidate]:
     """Turn raw quotes into filtered, fully-costed candidates."""
     rejects = stats_counter if stats_counter is not None else Counter()
@@ -437,6 +464,11 @@ def build_candidates(
                 support_20d=stats.support_20d,
                 earnings_date=earnings_date,
                 quote_age_note=_quote_age_note(quote, market_open),
+                setup=stats.setup,
+                move_quarter=stats.move_quarter,
+                move_month=stats.move_20d,
+                pe=(fundamentals or {}).get("pe"),
+                peg=(fundamentals or {}).get("peg"),
             )
         )
         rejects["accepted"] += 1
@@ -473,6 +505,42 @@ def resize_candidate(candidate: Candidate, contracts: int) -> Candidate:
     return candidate
 
 
+def fundamentals_pass(
+    symbol: str,
+    fundamentals: dict[str, dict[str, float | None]] | None,
+    cfg: WheelConfig,
+) -> str | None:
+    """Valuation gate. Returns a rejection reason, or None to proceed.
+
+    Skipped entirely when no fundamentals were supplied. ETFs legitimately
+    have no P/E or PEG, so a missing value only rejects when the caller asks
+    for it with ``require_fundamentals``.
+    """
+    if cfg.max_pe is None and cfg.max_peg is None:
+        return None
+
+    row = (fundamentals or {}).get(symbol.upper())
+    if not row:
+        return "no fundamentals available" if cfg.require_fundamentals else None
+
+    pe, peg = row.get("pe"), row.get("peg")
+    if cfg.max_pe is not None:
+        if pe is None:
+            if cfg.require_fundamentals:
+                return "no P/E available"
+        elif pe <= 0:
+            return "negative or zero P/E (unprofitable)"
+        elif pe > cfg.max_pe:
+            return f"P/E above {cfg.max_pe:g}"
+    if cfg.max_peg is not None:
+        if peg is None:
+            if cfg.require_fundamentals:
+                return "no PEG available"
+        elif peg > cfg.max_peg:
+            return f"PEG above {cfg.max_peg:g}"
+    return None
+
+
 def underlying_passes(
     stats: UnderlyingStats, cfg: WheelConfig, right: str
 ) -> str | None:
@@ -484,6 +552,14 @@ def underlying_passes(
     if right == "P" and cfg.require_above_sma50:
         if stats.sma50 == stats.sma50 and stats.spot < stats.sma50:
             return "below 50-day average"
+
+    # A covered call is written against shares already held, so the trend
+    # gates only apply to the put side that would open a new position.
+    if right == "P":
+        if cfg.require_pullback and stats.setup != PULLBACK:
+            return f"setup is {stats.setup}, not a pullback"
+        if cfg.exclude_falling_knife and stats.setup == FALLING_KNIFE:
+            return "falling knife (down on quarter and month)"
     return None
 
 

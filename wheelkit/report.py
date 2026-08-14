@@ -49,6 +49,7 @@ def print_scan_table(candidates: list[Candidate]) -> None:
     headers = [
         "#", "Symbol", "Score", "Exp", "DTE", "Strike", "Bid/Ask", "Delta",
         "IV", "VRP", "Qty", "Credit", "Capital", "Ann.", "P(profit)", "Cushion",
+        "Setup",
     ]
     rows = []
     for i, c in enumerate(candidates, 1):
@@ -69,6 +70,7 @@ def print_scan_table(candidates: list[Candidate]) -> None:
             fmt_num(c.annualised_return, ".0%"),
             fmt_num(c.prob_profit, ".0%"),
             fmt_num(c.cushion_sigmas, ".2f") + "σ",
+            c.setup,
         ])
     print("\n" + render_table(rows, headers))
 
@@ -109,6 +111,15 @@ def print_trade_card(candidate: Candidate, *, index: int | None = None) -> None:
     print(f"  ODDS       {fmt_num(candidate.prob_profit, '.0%')} chance of profit · "
           f"{fmt_num(candidate.prob_itm, '.0%')} chance of assignment · "
           f"delta {candidate.delta:+.3f}")
+    setup_line = f"  TREND      {candidate.setup}"
+    if candidate.move_quarter == candidate.move_quarter:
+        setup_line += f" · quarter {candidate.move_quarter:+.1%}"
+    if candidate.move_month == candidate.move_month:
+        setup_line += f" · month {candidate.move_month:+.1%}"
+    if candidate.pe is not None or candidate.peg is not None:
+        setup_line += (f" · P/E {fmt_num(candidate.pe, '.1f')}"
+                       f" · PEG {fmt_num(candidate.peg, '.2f')}")
+    print(setup_line)
     print(f"  VOL        IV {fmt_num(candidate.iv, '.1%')} vs realised "
           f"{fmt_num(candidate.rv20, '.1%')} → VRP {fmt_num(candidate.vrp, '.2f')}"
           f"  ({_vrp_verdict(candidate.vrp)})")

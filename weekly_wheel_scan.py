@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 from wheelkit.earnings import EarningsCalendar
+from wheelkit.finviz import fetch_fundamentals, parse_filters
 from wheelkit.engine import run_scan
 from wheelkit.netio import FetchError
 from wheelkit.providers import get_provider
@@ -70,6 +71,21 @@ def parse_args() -> argparse.Namespace:
                    help="Do not exclude expiries that span an earnings report")
     p.add_argument("--require-uptrend", action="store_true",
                    help="Only sell puts on names trading above their 50-day average")
+    p.add_argument("--require-pullback", action="store_true",
+                   help="Only names up over the quarter but down over the month")
+    p.add_argument("--allow-falling-knife", action="store_true",
+                   help="Do not exclude names down over both the quarter and month")
+
+    p.add_argument("--finviz-url",
+                   help="Finviz screener URL. Its matches become the universe "
+                        "and supply P/E and PEG for the ownership gate.")
+    p.add_argument("--finviz-max-rows", type=int, default=200)
+    p.add_argument("--max-pe", type=float,
+                   help="Reject stocks above this P/E (needs --finviz-url)")
+    p.add_argument("--max-peg", type=float,
+                   help="Reject stocks above this PEG (needs --finviz-url)")
+    p.add_argument("--require-fundamentals", action="store_true",
+                   help="Reject names with no P/E or PEG rather than passing them")
     p.add_argument("--allow-duplicate-symbols", action="store_true",
                    help="Permit several strikes on the same ticker in the top N")
     p.add_argument("--offline-earnings", action="store_true",
@@ -107,6 +123,11 @@ def main() -> int:
         min_avg_dollar_volume=args.min_dollar_volume,
         skip_earnings=not args.allow_earnings,
         require_above_sma50=args.require_uptrend,
+        require_pullback=args.require_pullback,
+        exclude_falling_knife=not args.allow_falling_knife,
+        max_pe=args.max_pe,
+        max_peg=args.max_peg,
+        require_fundamentals=args.require_fundamentals,
         top_n=args.top,
         one_per_symbol=not args.allow_duplicate_symbols,
         sort_by=args.sort,
@@ -118,7 +139,25 @@ def main() -> int:
         print(f"Could not start the {args.provider} provider: {exc}", file=sys.stderr)
         return 2
 
-    symbols = load_symbols(args)
+    fundamentals: dict[str, dict[str, float | None]] = {}
+    if args.finviz_url:
+        try:
+            filters = parse_filters(args.finviz_url)
+            print("Fetching the Finviz screen...")
+            fundamentals = fetch_fundamentals(
+                filters, max_rows=args.finviz_max_rows
+            )
+        except (ValueError, FetchError) as exc:
+            print(f"Could not read the Finviz screen: {exc}", file=sys.stderr)
+            return 2
+        if not fundamentals:
+            print("The Finviz screen returned no stocks.", file=sys.stderr)
+            return 1
+        symbols = sorted(fundamentals)
+        print(f"Universe: {len(symbols)} stock(s) from Finviz\n")
+    else:
+        symbols = load_symbols(args)
+
     positions: dict[str, tuple[float, float]] = {}
     if right == "C":
         getter = getattr(provider, "positions", None)
@@ -165,7 +204,8 @@ def main() -> int:
 
     candidates, rejects, skipped, context = run_scan(
         provider, symbols, cfg, earnings,
-        right=right, positions=positions, verbose=not args.quiet,
+        right=right, positions=positions, fundamentals=fundamentals,
+        verbose=not args.quiet,
     )
 
     print()

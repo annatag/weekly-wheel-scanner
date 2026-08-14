@@ -16,6 +16,7 @@ from .strategy import (
     Candidate,
     WheelConfig,
     build_candidates,
+    fundamentals_pass,
     rank,
     score_candidate,
     underlying_passes,
@@ -92,6 +93,7 @@ def scan_symbol(
     shares_held: float = 0.0,
     cost_basis: float = 0.0,
     rejects: Counter[str] | None = None,
+    fundamentals: dict[str, dict[str, float | None]] | None = None,
 ) -> tuple[list[Candidate], UnderlyingStats | None, str | None]:
     """Scan one symbol. Returns (candidates, stats, skip_reason)."""
     today = today or date.today()
@@ -110,6 +112,12 @@ def scan_symbol(
     skip = underlying_passes(stats, cfg, right)
     if skip:
         return [], stats, skip
+
+    # Checked before the chain request so a rejected name costs no API call.
+    if right == "P":
+        skip = fundamentals_pass(symbol, fundamentals, cfg)
+        if skip:
+            return [], stats, skip
 
     earnings_date = earnings.next_date(symbol)
     low, high = strike_window(stats.spot, stats, cfg, right)
@@ -141,6 +149,7 @@ def scan_symbol(
         shares_held=shares_held,
         cost_basis=cost_basis,
         stats_counter=rejects,
+        fundamentals=(fundamentals or {}).get(symbol.upper()),
     )
     for candidate in candidates:
         score_candidate(candidate, cfg, context.regime_score)
@@ -155,6 +164,7 @@ def run_scan(
     *,
     right: str = "P",
     positions: dict[str, tuple[float, float]] | None = None,
+    fundamentals: dict[str, dict[str, float | None]] | None = None,
     verbose: bool = True,
 ) -> tuple[list[Candidate], Counter[str], dict[str, str], ScanContext]:
     """Scan the whole universe and return ranked candidates plus diagnostics."""
@@ -185,6 +195,7 @@ def run_scan(
                 shares_held=shares,
                 cost_basis=basis,
                 rejects=rejects,
+                fundamentals=fundamentals,
             )
         except Exception as exc:  # keep one bad symbol from ending the scan
             skipped[symbol] = f"error: {exc}"
