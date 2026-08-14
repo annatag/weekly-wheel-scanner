@@ -6,4 +6,4 @@ __pycache__/
 .earnings_cache.json
 wheel_scan_results.csv
 wheel_trade_suggestions.csv
-symbols.txt
+universe/

@@ -18,7 +18,12 @@ from pathlib import Path
 
 from wheelkit.netio import FetchError
 from wheelkit.providers import AlpacaProvider
-from wheelkit.universe import UniverseFilters, screen, write_symbols_file
+from wheelkit.universe import (
+    DEFAULT_UNIVERSE_PATH,
+    UniverseFilters,
+    screen,
+    write_symbols_file,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,7 +31,7 @@ def parse_args() -> argparse.Namespace:
         description="Build the scan universe from live Alpaca data.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--output", type=Path, default=Path("symbols.txt"))
+    p.add_argument("--output", type=Path, default=DEFAULT_UNIVERSE_PATH)
     p.add_argument("--min-price", type=float, default=5.0)
     p.add_argument(
         "--max-price",
