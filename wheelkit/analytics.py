@@ -26,6 +26,8 @@ class UnderlyingStats:
     avg_share_volume: float
     move_5d: float
     move_20d: float
+    move_quarter: float  # 63 trading days, matching Finviz's "Performance (Quarter)"
+    setup: str  # pullback | momentum | falling knife | rebound | unknown
     rv20: float  # annualised realised volatility, last 20 sessions
     rv60: float
     rv_percentile: float  # where rv20 sits within its own 1-year history
@@ -107,20 +109,61 @@ def average_true_range(bars: list[Bar], window: int = 14) -> float:
     return sum(trs) / len(trs) if trs else float("nan")
 
 
-def _trend_score(spot: float, sma20: float, sma50: float, sma200: float, move_20d: float) -> float:
-    """Blend of moving-average structure and recent drift, 0-100.
+PULLBACK = "pullback"
+MOMENTUM = "momentum"
+FALLING_KNIFE = "falling knife"
+REBOUND = "rebound"
+UNKNOWN = "unknown"
 
-    Selling puts is a bullish-to-neutral position, so a name below its own
-    50-day average is penalised rather than silently accepted.
+
+def classify_setup(move_quarter: float, move_month: float) -> str:
+    """Label the trend from the quarter and month returns.
+
+    The quarter sets the primary direction and the month says where price sits
+    within it. A stock up over the quarter but down over the month has an
+    intact uptrend and a recent dip: implied volatility is elevated by the
+    selloff while the longer trend still supports the strike. That is the
+    setup a put seller wants, and it is the one a naive "recent drift"
+    penalty rejects hardest.
+    """
+    if move_quarter != move_quarter or move_month != move_month:
+        return UNKNOWN
+    if move_quarter > 0:
+        return PULLBACK if move_month < 0 else MOMENTUM
+    return REBOUND if move_month > 0 else FALLING_KNIFE
+
+
+# How attractive each setup is to a put seller, 0-100. Scored as its own
+# term rather than folded into the trend score: buried inside safety, the
+# whole pullback-to-falling-knife range moved the final score under two
+# points, which is not enough to change any ranking.
+SETUP_SCORES = {
+    PULLBACK: 100.0,  # uptrend intact, dip has richened the premium
+    MOMENTUM: 55.0,  # healthy but extended, and volatility is usually cheap
+    REBOUND: 30.0,  # bouncing inside a downtrend
+    FALLING_KNIFE: 0.0,  # down on both horizons
+    UNKNOWN: 50.0,  # too little history to judge; stay neutral
+}
+
+
+def setup_score(setup: str) -> float:
+    return SETUP_SCORES.get(setup, 50.0)
+
+
+def _trend_score(spot: float, sma20: float, sma50: float, sma200: float) -> float:
+    """Moving-average structure alone, 0-100.
+
+    Previously this also added ``move_20d * 100``, treating every monthly
+    decline as a defect and so penalising the pullback setup precisely because
+    it had pulled back. The setup now carries its own weight in the score, and
+    this term is left to measure structure only, so neither is counted twice.
     """
     score = 50.0
-    for average, weight in ((sma20, 10.0), (sma50, 15.0), (sma200, 10.0)):
+    for average, weight in ((sma20, 12.0), (sma50, 20.0), (sma200, 12.0)):
         if average == average and average > 0:
             score += weight if spot > average else -weight
     if sma50 == sma50 and sma200 == sma200 and sma50 > 0 and sma200 > 0:
-        score += 5.0 if sma50 > sma200 else -5.0
-    if move_20d == move_20d:
-        score += max(-15.0, min(15.0, move_20d * 100.0))
+        score += 6.0 if sma50 > sma200 else -6.0
     return max(0.0, min(100.0, score))
 
 
@@ -141,6 +184,10 @@ def compute_stats(bars: list[Bar], spot: float) -> UnderlyingStats | None:
 
     move_5d = spot / closes[-6] - 1 if len(closes) >= 6 and closes[-6] > 0 else float("nan")
     move_20d = spot / closes[-21] - 1 if len(closes) >= 21 and closes[-21] > 0 else float("nan")
+    move_quarter = (
+        spot / closes[-64] - 1 if len(closes) >= 64 and closes[-64] > 0 else float("nan")
+    )
+    setup = classify_setup(move_quarter, move_20d)
 
     # Prefer the Parkinson estimator, fall back to close-to-close.
     rv20 = parkinson_vol(bars, 20)
@@ -165,13 +212,15 @@ def compute_stats(bars: list[Bar], spot: float) -> UnderlyingStats | None:
         avg_share_volume=avg_share_volume,
         move_5d=move_5d,
         move_20d=move_20d,
+        move_quarter=move_quarter,
+        setup=setup,
         rv20=rv20,
         rv60=rv60,
         rv_percentile=_rv_percentile(closes),
         sma20=sma20,
         sma50=sma50,
         sma200=sma200,
-        trend_score=_trend_score(spot, sma20, sma50, sma200, move_20d),
+        trend_score=_trend_score(spot, sma20, sma50, sma200),
         support_20d=min(lows20) if lows20 else float("nan"),
         support_60d=min(lows60) if lows60 else float("nan"),
         resistance_20d=max(highs20) if highs20 else float("nan"),
