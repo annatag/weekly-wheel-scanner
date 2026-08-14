@@ -19,7 +19,7 @@ from wheelkit.earnings import EarningsCalendar
 from wheelkit.finviz import fetch_fundamentals, parse_filters
 from wheelkit.engine import run_scan
 from wheelkit.netio import FetchError
-from wheelkit.providers import get_provider
+from wheelkit.providers import AlpacaProvider, get_provider
 from wheelkit.report import (
     print_context,
     print_diagnostics,
@@ -28,6 +28,11 @@ from wheelkit.report import (
     write_csv,
 )
 from wheelkit.strategy import WheelConfig
+from wheelkit.universe import (
+    DEFAULT_UNIVERSE_PATH,
+    build_universe_file,
+    read_symbols_file,
+)
 
 DEFAULT_SYMBOLS = [
     "AAPL", "AMD", "AMZN", "BAC", "C", "CSCO", "CVX", "DAL", "DIS", "F",
@@ -45,7 +50,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--provider", choices=("alpaca", "ibkr"), default="alpaca")
     p.add_argument("--right", choices=("put", "call"), default="put")
     p.add_argument("--symbols", help="Comma-separated tickers")
-    p.add_argument("--symbols-file", type=Path, default=Path("symbols.txt"))
+    p.add_argument("--symbols-file", type=Path, default=DEFAULT_UNIVERSE_PATH)
+    p.add_argument("--no-auto-build", action="store_true",
+                   help="Do not build the universe when the file is missing")
     p.add_argument("--earnings-file", type=Path, default=Path("earnings.csv"))
     p.add_argument("--output", type=Path, default=Path("wheel_scan_results.csv"))
     p.add_argument("--top", type=int, default=5)
@@ -94,16 +101,67 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def load_symbols(args: argparse.Namespace) -> list[str]:
-    if args.symbols:
-        raw = args.symbols.split(",")
-    elif args.symbols_file and args.symbols_file.exists():
-        raw = args.symbols_file.read_text(encoding="utf-8").splitlines()
-    else:
-        raw = DEFAULT_SYMBOLS
-    return sorted(
-        {s.strip().upper() for s in raw if s.strip() and not s.lstrip().startswith("#")}
+def _rebuild_command(path: Path) -> str:
+    """The exact command that regenerates this universe file."""
+    if path == DEFAULT_UNIVERSE_PATH:
+        return "python build_universe.py"
+    return f"python build_universe.py --output {path}"
+
+
+def warn_using_builtin_list(path: Path, reason: str) -> None:
+    """Say loudly that the scan is about to run on the fallback list.
+
+    Falling back silently once cost a whole session of wrong results: the
+    scanner reported on 33 built-in tickers while every conclusion was being
+    drawn as though it had screened the full universe.
+    """
+    print("", file=sys.stderr)
+    print("=" * 72, file=sys.stderr)
+    print(f"WARNING: {reason}", file=sys.stderr)
+    print(
+        f"Falling back to the {len(DEFAULT_SYMBOLS)} built-in tickers, which is "
+        "NOT your screened universe.",
+        file=sys.stderr,
     )
+    print("", file=sys.stderr)
+    print("  Rebuild it with:", file=sys.stderr)
+    print(f"      {_rebuild_command(path)}", file=sys.stderr)
+    print("=" * 72, file=sys.stderr)
+    print("", file=sys.stderr)
+
+
+def load_symbols(args: argparse.Namespace) -> list[str]:
+    """Explicit list, then the universe file, building it if it is missing."""
+    if args.symbols:
+        return sorted(
+            {
+                s.strip().upper()
+                for s in args.symbols.split(",")
+                if s.strip() and not s.lstrip().startswith("#")
+            }
+        )
+
+    path = args.symbols_file
+    symbols = read_symbols_file(path) if path else []
+    if symbols:
+        return symbols
+
+    if not path:
+        return sorted(DEFAULT_SYMBOLS)
+
+    if args.no_auto_build:
+        warn_using_builtin_list(path, f"{path} does not exist.")
+        return sorted(DEFAULT_SYMBOLS)
+
+    print(f"{path} is missing. Building the universe first...")
+    try:
+        built = build_universe_file(AlpacaProvider(), path)
+    except (FetchError, Exception) as exc:
+        warn_using_builtin_list(path, f"could not build the universe: {exc}")
+        return sorted(DEFAULT_SYMBOLS)
+
+    print(f"Built {len(built)} symbols into {path}.\n")
+    return sorted(built)
 
 
 def main() -> int:
