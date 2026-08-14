@@ -79,6 +79,10 @@ class WheelConfig:
     risk_free_rate: float = 0.04
     top_n: int = 5
     one_per_symbol: bool = True
+    # "score" balances premium against risk; "return" and "credit" rank on the
+    # payout alone, which surfaces the highest-delta, highest-volatility names
+    # precisely because they are the ones most likely to be assigned.
+    sort_by: str = "score"
 
     weights: dict[str, float] = field(
         default_factory=lambda: {
@@ -489,9 +493,12 @@ def rank(candidates: list[Candidate], cfg: WheelConfig) -> list[Candidate]:
     Without the per-symbol cap the top five can be five strikes on the same
     ticker, which concentrates rather than diversifies the week's risk.
     """
-    ordered = sorted(
-        candidates, key=lambda c: (c.score, c.annualised_return), reverse=True
-    )
+    keys = {
+        "score": lambda c: (c.score, c.annualised_return),
+        "return": lambda c: (c.annualised_return, c.score),
+        "credit": lambda c: (c.credit, c.score),
+    }
+    ordered = sorted(candidates, key=keys.get(cfg.sort_by, keys["score"]), reverse=True)
     if not cfg.one_per_symbol:
         return ordered[: cfg.top_n]
 
