@@ -65,6 +65,56 @@ The quarter sets the direction and the month says where price sits within it:
 dropped unless you pass `--allow-falling-knife`. Both gates apply only to
 puts; a covered call is written against shares you already hold.
 
+## Risk controls
+
+The scanner ranks what is *worth* selling. Nothing enforced what actually got
+sold, and that gap is where losses come from: on a five-position paper book,
+four entries sat outside the scanner's own delta band, the two worst were the
+two furthest outside it, and the single position inside the band was the
+clean winner.
+
+`wheel_positions.py` closes that gap at three points.
+
+**Before you trade** — a pass/fail gate on a specific contract:
+
+```bash
+python wheel_positions.py --check GM 87 P 2026-09-18 1.09
+```
+
+Refuses a strike sold in the money, a delta above the band, an expiry that
+spans earnings, or a falling-knife setup, and suggests a position size.
+
+**At sizing** — contracts are scaled so a two-sigma adverse move stays inside
+a risk budget, rather than filling a fixed cash sleeve. Filling a sleeve puts
+the most contracts on the cheapest stock, which is usually the most volatile:
+a $28 name took five contracts and a 10% week cost five times what one would
+have.
+
+**While open** — monitoring, silent unless something trips:
+
+```bash
+python wheel_positions.py                 # full table plus alerts
+python wheel_positions.py --alerts-only   # for a scheduled job
+```
+
+Alerts on: a position going in the money, delta past 0.50, 50% of max profit
+captured, the last three days before expiry at a live delta, and a daily move
+over 5% in the underlying.
+
+Positions are read from IBKR, Alpaca or `positions.csv`. The CSV matters
+because IBKR only reports while TWS is running, and a monitor that silently
+reports nothing whenever TWS is closed is worse than none.
+
+### Running it on a schedule
+
+```bash
+./scripts/install_monitor.sh
+```
+
+Weekdays at 15:00 (an hour left to act) and 16:15 (after the close, marks
+settled). Alerts only, so a quiet day produces no output. Remove it with the
+command the installer prints.
+
 ## The four commands
 
 ### `build_universe.py` — what to scan
