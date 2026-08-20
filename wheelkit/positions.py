@@ -284,6 +284,25 @@ def enrich(
     return positions
 
 
+@dataclass
+class SourceReport:
+    """Which source supplied the positions, and what the others said.
+
+    A fallback that happens silently is the failure this whole tool exists to
+    prevent: the scanner once ran a full session on its built-in ticker list
+    without saying so, and a hand-typed CSV carried three wrong entry prices
+    for days. So the source is always reported, never assumed.
+    """
+
+    used: str | None = None
+    attempts: list[tuple[str, str]] = field(default_factory=list)
+
+    @property
+    def is_live(self) -> bool:
+        """True when positions came from a broker rather than a local file."""
+        return self.used in {"ibkr", "alpaca"}
+
+
 def load_positions(
     source: str,
     *,
@@ -291,36 +310,55 @@ def load_positions(
     path: Path = DEFAULT_POSITIONS_FILE,
     host: str = "127.0.0.1",
     port: int = 7497,
-) -> list[OpenOption]:
-    if source == "csv":
-        return read_positions_csv(path)
-    if source == "alpaca":
-        if provider is None:
-            raise FetchError("Alpaca provider required for --source alpaca")
-        return read_positions_alpaca(provider)
-    if source == "ibkr":
-        return read_positions_ibkr(host, port)
-    if source == "auto":
-        # ib_async logs a connection failure at ERROR level before raising.
-        # In auto mode an unreachable TWS is an expected fallthrough, not a
-        # fault, and the noise would swamp a scheduled job's log.
-        import logging
+) -> tuple[list[OpenOption], SourceReport]:
+    """Load positions and report where they came from."""
+    report = SourceReport()
 
-        ib_logger = logging.getLogger("ib_async")
-        previous = ib_logger.level
-        ib_logger.setLevel(logging.CRITICAL)
-        try:
-            for candidate in ("ibkr", "alpaca", "csv"):
-                try:
-                    found = load_positions(
-                        candidate, provider=provider, path=path,
-                        host=host, port=port,
-                    )
-                except Exception:
-                    continue
-                if found:
-                    return found
-        finally:
-            ib_logger.setLevel(previous)
-        return []
-    raise ValueError(f"unknown source {source!r}")
+    def _one(name: str) -> list[OpenOption]:
+        if name == "csv":
+            return read_positions_csv(path)
+        if name == "alpaca":
+            if provider is None:
+                raise FetchError("Alpaca provider required for --source alpaca")
+            return read_positions_alpaca(provider)
+        if name == "ibkr":
+            return read_positions_ibkr(host, port)
+        raise ValueError(f"unknown source {name!r}")
+
+    if source != "auto":
+        found = _one(source)
+        report.used = source
+        report.attempts.append((source, f"{len(found)} position(s)"))
+        return found, report
+
+    # ib_async logs a connection failure at ERROR level before raising. In
+    # auto mode an unreachable TWS is an expected fallthrough, not a fault,
+    # and the noise would swamp a scheduled job's log.
+    import logging
+
+    ib_logger = logging.getLogger("ib_async")
+    previous = ib_logger.level
+    ib_logger.setLevel(logging.CRITICAL)
+    try:
+        for candidate in ("ibkr", "alpaca", "csv"):
+            try:
+                found = _one(candidate)
+            except Exception as exc:
+                report.attempts.append((candidate, _short_reason(exc)))
+                continue
+            if found:
+                report.attempts.append((candidate, f"{len(found)} position(s)"))
+                report.used = candidate
+                return found, report
+            report.attempts.append((candidate, "no positions"))
+    finally:
+        ib_logger.setLevel(previous)
+    return [], report
+
+
+def _short_reason(exc: Exception) -> str:
+    """One readable line explaining why a source was unavailable."""
+    text = str(exc).split("\n")[0]
+    if "Connect call failed" in text or "Could not reach TWS" in text:
+        return "TWS not reachable"
+    return text[:70] if text else exc.__class__.__name__

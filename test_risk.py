@@ -330,3 +330,80 @@ class TestKeychain(unittest.TestCase):
             self.assertEqual(os.environ["PROBE"], "from-keychain")
         finally:
             os.environ.pop("PROBE", None)
+
+
+class TestSourceReporting(unittest.TestCase):
+    """A fallback that happens silently is the failure being guarded against."""
+
+    def setUp(self):
+        from datetime import date as _date
+
+        from wheelkit.positions import OpenOption
+
+        self.fake = [OpenOption("GM", "GM260821P00087000", "P", 87.0,
+                                _date(2026, 8, 21), -1, 1.157)]
+
+    def test_csv_fallback_is_not_live(self):
+        from unittest.mock import patch
+
+        from wheelkit.positions import load_positions
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "positions.csv"
+            path.write_text(
+                "symbol,expiration,strike,right,quantity,entry_credit\n"
+                "GM,2026-08-21,87,P,-1,1.157\n", encoding="utf-8",
+            )
+            with patch("wheelkit.positions.read_positions_ibkr",
+                       side_effect=RuntimeError("Could not reach TWS")):
+                positions, report = load_positions("auto", path=path)
+
+        self.assertEqual(len(positions), 1)
+        self.assertEqual(report.used, "csv")
+        self.assertFalse(report.is_live)
+
+    def test_broker_source_is_live(self):
+        from unittest.mock import patch
+
+        from wheelkit.positions import load_positions
+
+        with patch("wheelkit.positions.read_positions_ibkr", return_value=self.fake):
+            _, report = load_positions("auto")
+        self.assertEqual(report.used, "ibkr")
+        self.assertTrue(report.is_live)
+
+    def test_every_attempt_is_recorded_with_a_reason(self):
+        from unittest.mock import patch
+
+        from wheelkit.positions import load_positions
+
+        with patch("wheelkit.positions.read_positions_ibkr",
+                   side_effect=RuntimeError("Connect call failed")):
+            _, report = load_positions("auto", path=Path("/nonexistent.csv"))
+        attempted = dict(report.attempts)
+        self.assertIn("ibkr", attempted)
+        self.assertEqual(attempted["ibkr"], "TWS not reachable")
+
+    def test_explicit_source_does_not_fall_back(self):
+        from unittest.mock import patch
+
+        from wheelkit.positions import load_positions
+
+        with patch("wheelkit.positions.read_positions_ibkr",
+                   side_effect=RuntimeError("Could not reach TWS")):
+            with self.assertRaises(RuntimeError):
+                load_positions("ibkr")
+
+    def test_no_positions_anywhere_reports_nothing_used(self):
+        from unittest.mock import patch
+
+        from wheelkit.positions import load_positions
+
+        with patch("wheelkit.positions.read_positions_ibkr", return_value=[]):
+            with patch("wheelkit.positions.read_positions_alpaca", return_value=[]):
+                positions, report = load_positions(
+                    "auto", path=Path("/nonexistent.csv")
+                )
+        self.assertEqual(positions, [])
+        self.assertIsNone(report.used)
+        self.assertFalse(report.is_live)

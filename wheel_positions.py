@@ -64,6 +64,31 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def warn_not_live(report, path: Path) -> None:
+    """Say plainly when positions came from a file rather than the broker.
+
+    A quiet fallback is the failure this tool exists to catch. The scanner
+    once ran a whole session on its built-in ticker list without saying so,
+    and this file carried three wrong entry prices for days. So the source is
+    always stated, including under --alerts-only, which is what the scheduled
+    job runs.
+    """
+    print("", file=sys.stderr)
+    print("=" * 72, file=sys.stderr)
+    print(f"WARNING: positions came from {path}, NOT your broker.", file=sys.stderr)
+    for name, outcome in report.attempts:
+        marker = "<- used" if name == report.used else ""
+        print(f"    {name:<8} {outcome} {marker}", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("  This file is hand-maintained. Closed or expired positions keep",
+          file=sys.stderr)
+    print("  alerting until you edit it, and entry prices are whatever was typed.",
+          file=sys.stderr)
+    print("  Start TWS for live broker data.", file=sys.stderr)
+    print("=" * 72, file=sys.stderr)
+    print("", file=sys.stderr)
+
+
 def print_findings(findings: list[Finding], indent: str = "    ") -> None:
     marker = {URGENT: "!!", WARN: " !", "INFO": "  "}
     for finding in findings:
@@ -189,7 +214,7 @@ def main() -> int:
         return 2
 
     try:
-        positions = load_positions(
+        positions, source_report = load_positions(
             args.source, provider=provider, path=args.positions_file,
             host=args.host, port=args.port,
         )
@@ -203,6 +228,9 @@ def main() -> int:
         except FetchError as exc:
             print(f"Could not price positions: {exc}", file=sys.stderr)
             return 2
+
+    if positions and not source_report.is_live:
+        warn_not_live(source_report, args.positions_file)
 
     if args.check:
         return run_check(args, provider, positions, limits)
@@ -238,7 +266,7 @@ def main() -> int:
     if not args.alerts_only:
         total = sum(p.unrealised for p in positions if p.unrealised == p.unrealised)
         committed = sum(p.capital for p in positions if p.capital == p.capital)
-        print(f"{len(positions)} open position(s) from {positions[0].source} · "
+        print(f"{len(positions)} open position(s) from {source_report.used} · "
               f"${committed:,.0f} committed · unrealised ${total:+,.0f}")
         print()
         print(build_table(positions))

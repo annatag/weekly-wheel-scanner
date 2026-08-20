@@ -130,9 +130,26 @@ Alerts on: a position going in the money, delta past 0.50, 50% of max profit
 captured, the last three days before expiry at a live delta, and a daily move
 over 5% in the underlying.
 
-Positions are read from IBKR, Alpaca or `positions.csv`. The CSV matters
-because IBKR only reports while TWS is running, and a monitor that silently
-reports nothing whenever TWS is closed is worse than none.
+Positions are read from IBKR, Alpaca or `positions.csv`, tried in that order.
+The CSV matters because IBKR only reports while TWS is running, and a monitor
+that silently reports nothing whenever TWS is closed is worse than none.
+
+**When the CSV is used, it says so** — on stderr, including under
+`--alerts-only`, so a scheduled run records it in the log:
+
+```
+WARNING: positions came from positions.csv, NOT your broker.
+    ibkr     TWS not reachable
+    alpaca   no positions
+    csv      5 position(s) <- used
+```
+
+The file is hand-maintained: closed or expired positions keep alerting until
+you edit it, and entry prices are whatever was typed in. A quiet fallback is
+exactly the failure this tool exists to catch, so it is never quiet.
+
+`--source ibkr` refuses to fall back at all and errors instead, which is what
+you want when checking whether TWS is actually reachable.
 
 ### Running it on a schedule
 
