@@ -48,7 +48,7 @@ class RiskLimits:
     # Most that one adverse two-sigma move may cost, as a share of account.
     risk_budget_pct: float = 0.02
     max_contracts_per_position: int = 10
-    max_capital_per_position_pct: float = 0.15
+    max_capital_per_position_pct: float = 0.20
 
     # --- portfolio ----------------------------------------------------
     max_open_positions: int = 8

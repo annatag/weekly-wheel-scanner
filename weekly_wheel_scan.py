@@ -63,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     p.add_argument("--min-cash", type=float, default=3_000)
-    p.add_argument("--max-cash", type=float, default=15_000)
+    p.add_argument("--max-cash", type=float, default=20_000)
     p.add_argument("--min-dte", type=int, default=7)
     p.add_argument("--max-dte", type=int, default=21)
     p.add_argument("--min-delta", type=float, default=0.10)

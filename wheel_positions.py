@@ -18,6 +18,7 @@ from pathlib import Path
 from wheelkit.analytics import compute_stats
 from wheelkit.earnings import EarningsCalendar
 from wheelkit.netio import FetchError
+from wheelkit.notify import NotifyConfig, dispatch
 from wheelkit.positions import (
     DEFAULT_POSITIONS_FILE,
     OpenOption,
@@ -55,6 +56,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--account-value", type=float, default=100_000.0)
     p.add_argument("--alerts-only", action="store_true",
                    help="Print nothing unless a position trips a threshold")
+    p.add_argument("--no-banner", action="store_true",
+                   help="Do not post a macOS notification")
+    p.add_argument("--no-push", action="store_true",
+                   help="Do not send an ntfy push")
+    p.add_argument("--notify-test", action="store_true",
+                   help="Send a test notification through every channel and exit")
     p.add_argument("--earnings-file", type=Path, default=Path("earnings.csv"))
     p.add_argument("--offline-earnings", action="store_true")
     p.add_argument(
@@ -87,6 +94,34 @@ def warn_not_live(report, path: Path) -> None:
     print("  Start TWS for live broker data.", file=sys.stderr)
     print("=" * 72, file=sys.stderr)
     print("", file=sys.stderr)
+
+
+def run_notify_test(args: argparse.Namespace) -> int:
+    """Prove the delivery path works without waiting for a real alert."""
+    from wheelkit.notify import NTFY_TOPIC_ENV, banner_available
+
+    config = NotifyConfig.from_environment(
+        banner=not args.no_banner, push=not args.no_push
+    )
+    print(f"  macOS banner : {'available' if banner_available() else 'unavailable'}"
+          f"{'' if config.banner else ' (disabled)'}")
+    print(f"  ntfy topic   : {config.topic or 'not set'}"
+          f"{'' if config.push else ' (disabled)'}")
+    if not config.topic:
+        print(f"\n  To enable push, pick any hard-to-guess topic name and store it:")
+        print(f"    python wheel_secrets.py --set {NTFY_TOPIC_ENV}")
+        print(f"  then subscribe to it in the ntfy app or at "
+              f"{config.server}/<topic>")
+
+    fake = [("TEST $100P", [Finding(URGENT, "test",
+                                    "notification delivery test - no real alert")])]
+    results = dispatch(fake, config)
+    print()
+    for channel, ok in results.items():
+        print(f"  {channel:8} {'sent' if ok else 'FAILED'}")
+    if not results:
+        print("  nothing sent - both channels are disabled or unconfigured")
+    return 0
 
 
 def print_findings(findings: list[Finding], indent: str = "    ") -> None:
@@ -207,6 +242,9 @@ def main() -> int:
     args = parse_args()
     limits = RiskLimits(account_value=args.account_value)
 
+    if args.notify_test:
+        return run_notify_test(args)
+
     try:
         provider = AlpacaProvider()
     except FetchError as exc:
@@ -281,6 +319,18 @@ def main() -> int:
     if portfolio:
         print("  PORTFOLIO")
         print_findings(portfolio)
+    if flagged:
+        config = NotifyConfig.from_environment(
+            banner=not args.no_banner, push=not args.no_push
+        )
+        summary = [
+            (f"{p.symbol} ${p.strike:g}{p.right}", p.findings) for p in flagged
+        ]
+        for channel, ok in dispatch(summary, config).items():
+            if not ok:
+                print(f"  (note: {channel} notification did not send)",
+                      file=sys.stderr)
+
     if not flagged and not portfolio and not args.alerts_only:
         print("No alerts. Every position is inside its limits.")
 

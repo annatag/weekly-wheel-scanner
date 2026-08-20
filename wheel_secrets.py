@@ -104,6 +104,20 @@ def cmd_migrate() -> int:
     return 0
 
 
+def cmd_set(name: str) -> int:
+    """Store any single named secret, not just the Alpaca pair."""
+    if not keychain.available():
+        print("The macOS Keychain is not available on this system.", file=sys.stderr)
+        return 2
+    value = getpass.getpass(f"  {name}: ").strip()
+    if not value:
+        print("No value given; nothing was changed.", file=sys.stderr)
+        return 1
+    keychain.put(name, value)
+    print(f"Stored {name} in the Keychain.")
+    return 0
+
+
 def cmd_delete() -> int:
     removed = [name for name in keychain.KEYS if keychain.delete(name)]
     print(f"Removed {len(removed)} secret(s) from the Keychain.")
@@ -116,7 +130,13 @@ def main() -> int:
         "command", choices=("status", "store", "migrate", "delete"),
         nargs="?", default="status",
     )
+    parser.add_argument(
+        "--set", metavar="NAME",
+        help="Store one named secret in the Keychain, prompting for the value",
+    )
     args = parser.parse_args()
+    if args.set:
+        return cmd_set(args.set)
     return {
         "status": cmd_status, "store": cmd_store,
         "migrate": cmd_migrate, "delete": cmd_delete,

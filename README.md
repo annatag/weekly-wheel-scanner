@@ -78,6 +78,27 @@ tail -20 logs/positions.log logs/positions.err
 Alerts land in `positions.log`; `positions.err` carries the warning when
 positions were read from the file instead of your broker.
 
+It also **pushes**, so you do not have to remember to look:
+
+```bash
+python wheel_positions.py --notify-test     # prove both channels work
+```
+
+- **macOS banner** — nothing to install, but only reaches you at the machine.
+- **ntfy.sh push** — reaches a phone, no account needed. Pick any
+  hard-to-guess topic, store it, and subscribe to it in the ntfy app:
+
+  ```bash
+  python wheel_secrets.py --set WHEELSCAN_NTFY_TOPIC
+  ```
+
+  The topic is effectively a password — anyone who knows it can read your
+  alerts — so it lives in the Keychain rather than a plist or shell profile.
+
+`--no-banner` and `--no-push` disable either. Delivery failures never raise:
+a notification server being briefly unreachable must not take down the
+monitor and lose the alert it was trying to deliver.
+
 ### After Friday's expiry — reconcile
 
 Expired and assigned positions vanish from the broker but stay in

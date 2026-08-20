@@ -407,3 +407,67 @@ class TestSourceReporting(unittest.TestCase):
         self.assertEqual(positions, [])
         self.assertIsNone(report.used)
         self.assertFalse(report.is_live)
+
+
+class TestNotifications(unittest.TestCase):
+    """Delivery must survive the characters the alert text actually contains."""
+
+    def _findings(self, *levels):
+        from wheelkit.risk import Finding
+
+        return [("C $136P", [Finding(l, "x", f"{l} message") for l in levels])]
+
+    def test_header_folding_handles_typographic_characters(self):
+        from wheelkit.notify import header_safe
+
+        # An em dash in the title raised UnicodeEncodeError inside urllib and
+        # silently lost the notification; alert text also carries "·" and "σ".
+        self.assertEqual(header_safe("Wheel — 1 urgent"), "Wheel - 1 urgent")
+        self.assertEqual(header_safe("a · b"), "a | b")
+        self.assertEqual(header_safe("0.77σ cushion"), "0.77sigma cushion")
+        header_safe("Wheel — 0.9σ · x").encode("latin-1")  # must not raise
+
+    def test_header_folding_is_lossy_but_never_fails(self):
+        from wheelkit.notify import header_safe
+
+        header_safe("emoji 🚨 and 日本語").encode("latin-1")
+
+    def test_summary_counts_by_severity(self):
+        from wheelkit.notify import summarise
+
+        _, subtitle, _ = summarise(self._findings(URGENT, URGENT, WARN))
+        self.assertIn("2 urgent", subtitle)
+        self.assertIn("1 warning", subtitle)
+
+    def test_summary_leads_with_the_worst_finding(self):
+        from wheelkit.notify import summarise
+
+        _, _, body = summarise(self._findings(WARN, URGENT))
+        self.assertIn("URGENT message", body)
+
+    def test_empty_alerts_send_nothing(self):
+        from wheelkit.notify import NotifyConfig, dispatch
+
+        self.assertEqual(dispatch([], NotifyConfig(banner=True, push=True)), {})
+
+    def test_push_without_a_topic_is_skipped_not_attempted(self):
+        from wheelkit.notify import NotifyConfig, dispatch
+
+        config = NotifyConfig(banner=False, push=True, topic=None)
+        self.assertNotIn("push", dispatch(self._findings(URGENT), config))
+
+    def test_delivery_failure_never_raises(self):
+        from wheelkit.notify import send_push
+
+        # An unroutable host must return False rather than take the monitor
+        # down and lose the alert it was trying to deliver.
+        self.assertFalse(
+            send_push("x", title="t", topic="topic",
+                      server="https://127.0.0.1:9")
+        )
+
+    def test_disabled_channels_are_not_reported(self):
+        from wheelkit.notify import NotifyConfig, dispatch
+
+        sent = dispatch(self._findings(WARN), NotifyConfig(banner=False, push=False))
+        self.assertEqual(sent, {})
