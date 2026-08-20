@@ -14,6 +14,7 @@ liquidity on spread, quote size and volume instead of pretending otherwise.
 from __future__ import annotations
 
 import os
+import sys
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -88,17 +89,60 @@ class Provider(Protocol):
     ) -> list[Quote]: ...
 
 
-def load_dotenv(path: Path | None = None) -> None:
-    """Populate os.environ from a .env file without clobbering real env vars."""
-    env_path = path or Path(__file__).resolve().parent.parent / ".env"
-    if not env_path.exists():
-        return
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
+def config_dir() -> Path:
+    """Where credentials live, outside the repository.
+
+    Keeping secrets in the working tree means one ``git add -f``, one
+    ``zip -r`` of the project folder, or one directory share leaks them. A
+    path outside the checkout cannot be swept up by any of those.
+    """
+    base = os.environ.get("XDG_CONFIG_HOME")
+    return (Path(base) if base else Path.home() / ".config") / "wheelscan"
+
+
+def env_search_path() -> list[Path]:
+    """Candidate .env locations, most specific first."""
+    candidates = []
+    override = os.environ.get("WHEELSCAN_ENV")
+    if override:
+        candidates.append(Path(override).expanduser())
+    candidates.append(config_dir() / ".env")
+    # Legacy in-repo location, still honoured so nothing breaks on upgrade.
+    candidates.append(Path(__file__).resolve().parent.parent / ".env")
+    return candidates
+
+
+def load_dotenv(path: Path | None = None) -> Path | None:
+    """Populate os.environ from the first .env found, without clobbering it.
+
+    Returns the file used, or None. Existing environment variables always
+    win, so a CI secret or an exported value overrides the file.
+    """
+    for env_path in ([path] if path else env_search_path()):
+        if env_path is None or not env_path.exists():
             continue
-        key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+
+        # A credentials file readable by other accounts on the machine is
+        # worth saying out loud; it is the failure the config directory and
+        # the 0600 mode exist to prevent.
+        try:
+            if env_path.stat().st_mode & 0o077:
+                print(
+                    f"WARNING: {env_path} is readable by other users. "
+                    f"Run: chmod 600 {env_path}",
+                    file=sys.stderr,
+                )
+        except OSError:
+            pass
+
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+        return env_path
+    return None
 
 
 def parse_occ(symbol: str) -> tuple[str, date, str, float] | None:
@@ -164,9 +208,13 @@ class AlpacaProvider:
         self.secret_key = secret_key or os.environ.get("ALPACA_API_SECRET_KEY", "")
         if not self.key_id or not self.secret_key:
             raise FetchError(
-                "Alpaca credentials missing. Set ALPACA_API_KEY_ID and "
-                "ALPACA_API_SECRET_KEY in the environment or in a .env file "
-                "next to this repository (see .env.example)."
+                "Alpaca credentials missing. Create "
+                f"{config_dir() / '.env'} containing:\n"
+                "  ALPACA_API_KEY_ID=...\n"
+                "  ALPACA_API_SECRET_KEY=...\n"
+                "then: chmod 600 that file. See .env.example.\n"
+                "Searched: "
+                + ", ".join(str(c) for c in env_search_path())
             )
         self.option_feed = option_feed
         self.bar_feed = bar_feed

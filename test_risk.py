@@ -212,3 +212,57 @@ class TestPositionsFile(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCredentialLocation(unittest.TestCase):
+    """Credentials must resolve outside the checkout, and say so when absent."""
+
+    def test_config_dir_is_outside_the_repository(self):
+        from wheelkit.providers import config_dir
+
+        repo = Path(__file__).resolve().parent
+        self.assertNotIn(repo, config_dir().parents)
+        self.assertNotEqual(config_dir(), repo)
+
+    def test_search_order_prefers_config_over_repo(self):
+        import os
+        from wheelkit.providers import env_search_path
+
+        previous = os.environ.pop("WHEELSCAN_ENV", None)
+        try:
+            paths = env_search_path()
+        finally:
+            if previous is not None:
+                os.environ["WHEELSCAN_ENV"] = previous
+        self.assertEqual(len(paths), 2)
+        self.assertTrue(str(paths[0]).endswith("wheelscan/.env"))
+        self.assertTrue(str(paths[1]).endswith("weekly-wheel-scan/.env"))
+
+    def test_explicit_override_wins(self):
+        import os
+        from wheelkit.providers import env_search_path
+
+        os.environ["WHEELSCAN_ENV"] = "/tmp/custom.env"
+        try:
+            self.assertEqual(str(env_search_path()[0]), "/tmp/custom.env")
+        finally:
+            os.environ.pop("WHEELSCAN_ENV")
+
+    def test_load_returns_none_when_nothing_exists(self):
+        from wheelkit.providers import load_dotenv
+
+        self.assertIsNone(load_dotenv(Path("/nonexistent/nowhere/.env")))
+
+    def test_existing_environment_wins_over_the_file(self):
+        import os
+        from wheelkit.providers import load_dotenv
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            path.write_text("WHEEL_TEST_KEY=from_file\n", encoding="utf-8")
+            os.environ["WHEEL_TEST_KEY"] = "from_environment"
+            try:
+                load_dotenv(path)
+                self.assertEqual(os.environ["WHEEL_TEST_KEY"], "from_environment")
+            finally:
+                os.environ.pop("WHEEL_TEST_KEY", None)

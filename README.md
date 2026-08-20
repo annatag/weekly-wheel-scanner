@@ -16,8 +16,27 @@ python wheel_trade_suggestions.py           # re-quote a saved scan before you t
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env        # then paste your Alpaca keys into .env
+
+mkdir -p ~/.config/wheelscan && chmod 700 ~/.config/wheelscan
+cp .env.example ~/.config/wheelscan/.env
+chmod 600 ~/.config/wheelscan/.env      # then paste your Alpaca keys into it
 ```
+
+**Credentials live outside the repository.** Alpaca keys grant full account
+access from anywhere, so a stray `git add -f`, a `zip -r` of the project
+folder, or a shared directory would leak them. A path outside the checkout
+cannot be swept up by any of those. Searched in order:
+
+1. `$WHEELSCAN_ENV` — explicit override
+2. `~/.config/wheelscan/.env` — preferred
+3. `<repo>/.env` — legacy, still honoured
+
+Real environment variables always win over any file, and a credentials file
+readable by other users on the machine prints a warning naming the fix.
+
+IBKR needs no credentials here: authentication is you logging into TWS, the
+connection is to `127.0.0.1` only, and both call sites pass `readonly=True`.
+There is no order-placing code anywhere in this repository.
 
 Data comes from Alpaca's free tier by default. The tier splits by recency
 rather than by product, so daily bars use `sip` (full consolidated volume)
