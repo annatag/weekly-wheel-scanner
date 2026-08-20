@@ -7,8 +7,11 @@ price to use. **It never places, modifies or cancels an order.**
 ```bash
 python weekly_wheel_scan.py                 # rank the best puts to sell this week
 python wheel_advise.py INTC                 # deep-dive one ticker: strike, expiry, price
-python wheel_trade_suggestions.py           # re-quote a saved scan before you trade
+python wheel_positions.py --check ...       # validate a trade before you place it
+python wheel_positions.py                   # monitor what is already open
 ```
+
+See [Weekly routine](#weekly-routine) for the order to run these in.
 
 ## Setup
 
@@ -54,6 +57,74 @@ while live quotes use `iex`, and options use the `indicative` feed. No paid
 subscription is required. `.env` is gitignored.
 
 Run the offline test suite with `python -m unittest test_wheelkit`.
+
+## Weekly routine
+
+Every command assumes:
+
+```bash
+cd ~/Repos/weekly-wheel-scan && source .venv/bin/activate
+```
+
+### Already running
+
+The position monitor fires weekdays at 15:00 and 16:15 via launchd and stays
+silent unless something trips. Read it whenever you like:
+
+```bash
+tail -20 logs/positions.log logs/positions.err
+```
+
+Alerts land in `positions.log`; `positions.err` carries the warning when
+positions were read from the file instead of your broker.
+
+### After Friday's expiry — reconcile
+
+Expired and assigned positions vanish from the broker but stay in
+`positions.csv`, where they keep alerting on contracts that no longer exist.
+
+```bash
+python wheel_positions.py --source ibkr     # authoritative, needs TWS open
+```
+
+Without TWS, delete the closed rows from `positions.csv` by hand.
+
+### Then, in order
+
+```bash
+python weekly_wheel_scan.py --top 10                        # 1. what to sell
+python wheel_advise.py HOOD                                 # 2. strike and expiry
+python wheel_positions.py --check HOOD 84 P 2026-09-18 1.20 # 3. VALIDATE
+python wheel_trade_suggestions.py                           # 4. re-quote
+                                                            # 5. place it, record it
+```
+
+**Step 3 is the one that changes outcomes.** Steps 1 and 2 tell you what is
+worth selling; step 3 is the only one that stops you selling something else.
+Four of the five positions in the paper book skipped it, and the two furthest
+outside the delta band were the two largest losses.
+
+Run the scan while the market is open. Outside hours, spreads widen enough
+that "spread too wide" becomes the largest rejection bucket and the results
+understate what is actually available.
+
+### Monthly
+
+```bash
+python build_universe.py
+```
+
+Rebuild when the universe is a few weeks old, or whenever you change
+`--max-cash` — the price ceiling has to move with it.
+
+### Ad hoc
+
+| When | Command |
+|---|---|
+| A holding moved hard | `python wheel_positions.py` |
+| Force a monitor run now | `launchctl kickstart -k gui/$(id -u)/com.wheelscan.positions` |
+| After changing any code | `python -m unittest test_wheelkit test_risk` |
+| Check where credentials resolve | `python wheel_secrets.py status` |
 
 ## Screening the business as well as the option
 
@@ -161,7 +232,7 @@ Weekdays at 15:00 (an hour left to act) and 16:15 (after the close, marks
 settled). Alerts only, so a quiet day produces no output. Remove it with the
 command the installer prints.
 
-## The four commands
+## Command reference
 
 ### `build_universe.py` — what to scan
 
