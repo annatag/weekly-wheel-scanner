@@ -22,17 +22,27 @@ cp .env.example ~/.config/wheelscan/.env
 chmod 600 ~/.config/wheelscan/.env      # then paste your Alpaca keys into it
 ```
 
-**Credentials live outside the repository.** Alpaca keys grant full account
-access from anywhere, so a stray `git add -f`, a `zip -r` of the project
-folder, or a shared directory would leak them. A path outside the checkout
-cannot be swept up by any of those. Searched in order:
+**Credentials live in the macOS Keychain, not on disk.**
 
-1. `$WHEELSCAN_ENV` — explicit override
-2. `~/.config/wheelscan/.env` — preferred
-3. `<repo>/.env` — legacy, still honoured
+```bash
+python wheel_secrets.py store      # prompt and save, input never echoed
+python wheel_secrets.py migrate    # move an existing .env in, then shred it
+python wheel_secrets.py status     # show where credentials resolve from
+```
 
-Real environment variables always win over any file, and a credentials file
-readable by other users on the machine prints a warning naming the fix.
+Resolved in order: real environment variables, then the Keychain, then
+`$WHEELSCAN_ENV`, `~/.config/wheelscan/.env`, and finally `<repo>/.env`. Every
+file location still works, so nothing breaks on upgrade, and a credentials
+file readable by other users prints a warning naming the fix.
+
+A file outside the repository already closes the accidental-leak paths — a
+stray `git add -f`, a `zip -r` of the project, a shared folder, another
+account on the machine. The Keychain closes the rest: nothing is plaintext at
+rest, and backups store ciphertext rather than the keys themselves.
+
+It is **not a sandbox**. Anything running as you can shell out to
+`security find-generic-password` and read the same value. This raises the cost
+of a leak; it does not make one impossible.
 
 IBKR needs no credentials here: authentication is you logging into TWS, the
 connection is to `127.0.0.1` only, and both call sites pass `readonly=True`.

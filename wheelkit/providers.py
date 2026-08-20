@@ -112,6 +112,27 @@ def env_search_path() -> list[Path]:
     return candidates
 
 
+def load_credentials(path: Path | None = None) -> str:
+    """Resolve credentials from the environment, the Keychain, then a file.
+
+    Returns a short description of where they came from. The Keychain is
+    preferred because a file — even one outside the repository at 0600 — is
+    plaintext at rest and is copied verbatim into every backup of the home
+    directory.
+    """
+    from . import secrets as keychain
+
+    if all(os.environ.get(k) for k in keychain.KEYS):
+        return "environment"
+
+    if path is None and keychain.load_into_environ():
+        if all(os.environ.get(k) for k in keychain.KEYS):
+            return "macOS Keychain"
+
+    used = load_dotenv(path)
+    return f"file {used}" if used else "nowhere"
+
+
 def load_dotenv(path: Path | None = None) -> Path | None:
     """Populate os.environ from the first .env found, without clobbering it.
 
@@ -203,12 +224,14 @@ class AlpacaProvider:
         bar_feed: str = "sip",
         quote_feed: str = "iex",
     ) -> None:
-        load_dotenv()
+        self.credential_source = load_credentials()
         self.key_id = key_id or os.environ.get("ALPACA_API_KEY_ID", "")
         self.secret_key = secret_key or os.environ.get("ALPACA_API_SECRET_KEY", "")
         if not self.key_id or not self.secret_key:
             raise FetchError(
-                "Alpaca credentials missing. Create "
+                "Alpaca credentials missing. Store them in the Keychain:\n"
+                "  python wheel_secrets.py store\n"
+                "or create "
                 f"{config_dir() / '.env'} containing:\n"
                 "  ALPACA_API_KEY_ID=...\n"
                 "  ALPACA_API_SECRET_KEY=...\n"

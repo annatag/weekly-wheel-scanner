@@ -266,3 +266,67 @@ class TestCredentialLocation(unittest.TestCase):
                 self.assertEqual(os.environ["WHEEL_TEST_KEY"], "from_environment")
             finally:
                 os.environ.pop("WHEEL_TEST_KEY", None)
+
+
+class TestKeychain(unittest.TestCase):
+    """Keychain round-trip, isolated under a throwaway service name."""
+
+    SERVICE = "wheelscan-unittest"
+
+    def setUp(self):
+        from wheelkit import secrets as keychain
+
+        if not keychain.available():
+            self.skipTest("macOS Keychain unavailable")
+        self.kc = keychain
+        self.kc.delete("PROBE", self.SERVICE)
+
+    def tearDown(self):
+        self.kc.delete("PROBE", self.SERVICE)
+
+    def test_round_trip(self):
+        self.kc.put("PROBE", "value-one", self.SERVICE)
+        self.assertEqual(self.kc.get("PROBE", self.SERVICE), "value-one")
+
+    def test_overwrite_replaces_rather_than_duplicating(self):
+        self.kc.put("PROBE", "first", self.SERVICE)
+        self.kc.put("PROBE", "second", self.SERVICE)
+        self.assertEqual(self.kc.get("PROBE", self.SERVICE), "second")
+
+    def test_missing_key_returns_none(self):
+        self.assertIsNone(self.kc.get("NEVER_STORED", self.SERVICE))
+
+    def test_empty_values_are_refused(self):
+        # An empty secret stores fine and then fails opaquely at call time.
+        with self.assertRaises(self.kc.KeychainError):
+            self.kc.put("PROBE", "", self.SERVICE)
+
+    def test_delete_reports_whether_anything_went(self):
+        self.kc.put("PROBE", "x", self.SERVICE)
+        self.assertTrue(self.kc.delete("PROBE", self.SERVICE))
+        self.assertFalse(self.kc.delete("PROBE", self.SERVICE))
+
+    def test_environment_is_never_overwritten(self):
+        import os
+
+        self.kc.put("PROBE", "from-keychain", self.SERVICE)
+        os.environ["PROBE"] = "from-environment"
+        try:
+            loaded = self.kc.load_into_environ(("PROBE",), self.SERVICE)
+            self.assertEqual(loaded, [])
+            self.assertEqual(os.environ["PROBE"], "from-environment")
+        finally:
+            os.environ.pop("PROBE", None)
+
+    def test_load_into_environ_fills_a_missing_name(self):
+        import os
+
+        self.kc.put("PROBE", "from-keychain", self.SERVICE)
+        os.environ.pop("PROBE", None)
+        try:
+            self.assertEqual(
+                self.kc.load_into_environ(("PROBE",), self.SERVICE), ["PROBE"]
+            )
+            self.assertEqual(os.environ["PROBE"], "from-keychain")
+        finally:
+            os.environ.pop("PROBE", None)
