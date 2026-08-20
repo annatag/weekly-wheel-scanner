@@ -7,3 +7,5 @@ __pycache__/
 wheel_scan_results.csv
 wheel_trade_suggestions.csv
 universe/
+positions.csv
+logs/

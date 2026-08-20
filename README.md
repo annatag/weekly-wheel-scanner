@@ -16,8 +16,37 @@ python wheel_trade_suggestions.py           # re-quote a saved scan before you t
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env        # then paste your Alpaca keys into .env
+
+mkdir -p ~/.config/wheelscan && chmod 700 ~/.config/wheelscan
+cp .env.example ~/.config/wheelscan/.env
+chmod 600 ~/.config/wheelscan/.env      # then paste your Alpaca keys into it
 ```
+
+**Credentials live in the macOS Keychain, not on disk.**
+
+```bash
+python wheel_secrets.py store      # prompt and save, input never echoed
+python wheel_secrets.py migrate    # move an existing .env in, then shred it
+python wheel_secrets.py status     # show where credentials resolve from
+```
+
+Resolved in order: real environment variables, then the Keychain, then
+`$WHEELSCAN_ENV`, `~/.config/wheelscan/.env`, and finally `<repo>/.env`. Every
+file location still works, so nothing breaks on upgrade, and a credentials
+file readable by other users prints a warning naming the fix.
+
+A file outside the repository already closes the accidental-leak paths — a
+stray `git add -f`, a `zip -r` of the project, a shared folder, another
+account on the machine. The Keychain closes the rest: nothing is plaintext at
+rest, and backups store ciphertext rather than the keys themselves.
+
+It is **not a sandbox**. Anything running as you can shell out to
+`security find-generic-password` and read the same value. This raises the cost
+of a leak; it does not make one impossible.
+
+IBKR needs no credentials here: authentication is you logging into TWS, the
+connection is to `127.0.0.1` only, and both call sites pass `readonly=True`.
+There is no order-placing code anywhere in this repository.
 
 Data comes from Alpaca's free tier by default. The tier splits by recency
 rather than by product, so daily bars use `sip` (full consolidated volume)
@@ -64,6 +93,56 @@ The quarter sets the direction and the month says where price sits within it:
 `--require-pullback` restricts the scan to the first row. Falling knives are
 dropped unless you pass `--allow-falling-knife`. Both gates apply only to
 puts; a covered call is written against shares you already hold.
+
+## Risk controls
+
+The scanner ranks what is *worth* selling. Nothing enforced what actually got
+sold, and that gap is where losses come from: on a five-position paper book,
+four entries sat outside the scanner's own delta band, the two worst were the
+two furthest outside it, and the single position inside the band was the
+clean winner.
+
+`wheel_positions.py` closes that gap at three points.
+
+**Before you trade** — a pass/fail gate on a specific contract:
+
+```bash
+python wheel_positions.py --check GM 87 P 2026-09-18 1.09
+```
+
+Refuses a strike sold in the money, a delta above the band, an expiry that
+spans earnings, or a falling-knife setup, and suggests a position size.
+
+**At sizing** — contracts are scaled so a two-sigma adverse move stays inside
+a risk budget, rather than filling a fixed cash sleeve. Filling a sleeve puts
+the most contracts on the cheapest stock, which is usually the most volatile:
+a $28 name took five contracts and a 10% week cost five times what one would
+have.
+
+**While open** — monitoring, silent unless something trips:
+
+```bash
+python wheel_positions.py                 # full table plus alerts
+python wheel_positions.py --alerts-only   # for a scheduled job
+```
+
+Alerts on: a position going in the money, delta past 0.50, 50% of max profit
+captured, the last three days before expiry at a live delta, and a daily move
+over 5% in the underlying.
+
+Positions are read from IBKR, Alpaca or `positions.csv`. The CSV matters
+because IBKR only reports while TWS is running, and a monitor that silently
+reports nothing whenever TWS is closed is worse than none.
+
+### Running it on a schedule
+
+```bash
+./scripts/install_monitor.sh
+```
+
+Weekdays at 15:00 (an hour left to act) and 16:15 (after the close, marks
+settled). Alerts only, so a quiet day produces no output. Remove it with the
+command the installer prints.
 
 ## The four commands
 
