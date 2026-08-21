@@ -146,6 +146,35 @@ def send_push(
         return False
 
 
+# macOS shows roughly this much of a notification body in Alerts style before
+# truncating. Enough for four or five positions stated tersely.
+BANNER_BUDGET = 240
+
+
+def compact(body: str) -> str:
+    """Squeeze the summary into what a notification will actually display.
+
+    Each line already repeats the position label that its message also names
+    ("C $136P: C $136P is 4.2% in the money"), which wastes half the budget.
+    """
+    lines = []
+    for line in body.split("\n"):
+        label, _, message = line.partition(": ")
+        if message.startswith(label):
+            message = message[len(label):].lstrip()
+        lines.append(f"{label} {message}" if message else line)
+
+    out = []
+    used = 0
+    for line in lines:
+        if used + len(line) + 1 > BANNER_BUDGET:
+            out.append(f"(+{len(lines) - len(out)} more)")
+            break
+        out.append(line)
+        used += len(line) + 1
+    return "\n".join(out)
+
+
 def summarise(findings_by_position: list[tuple[str, list]]) -> tuple[str, str, str]:
     """Condense alerts into (title, subtitle, body) short enough for a banner."""
     urgent = sum(
@@ -196,9 +225,11 @@ def dispatch(
 
     sent: dict[str, bool] = {}
     if config.banner:
-        # A banner truncates hard, so lead with the count and the first line.
-        first = body.split("\n")[0]
-        sent["banner"] = send_banner(title, first, subtitle)
+        # Send the whole summary, not just the first line. Clicking "Show" on
+        # an osascript notification opens Script Editor, because that is the
+        # application the notification belongs to - there is no view of the
+        # alert behind it. So the notification has to be the whole message.
+        sent["banner"] = send_banner(title, compact(body), subtitle)
     if config.push and config.topic:
         sent["push"] = send_push(
             body,

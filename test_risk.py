@@ -529,3 +529,53 @@ class TestCoveredCallMath(unittest.TestCase):
         gap_small, gap_large, credit = 925.0, 1850.0, 215.0
         self.assertAlmostEqual(gap_small / credit, 4.30, places=1)
         self.assertAlmostEqual(gap_large / credit, 8.60, places=1)
+
+
+class TestNotificationBody(unittest.TestCase):
+    """Clicking "Show" opens Script Editor, not the alert, so the notification
+    body has to carry the whole message."""
+
+    def test_duplicate_label_is_stripped(self):
+        from wheelkit.notify import compact
+
+        # summarise() prefixes each line with the position, and the finding
+        # message names it again, burning half the display budget.
+        got = compact("C $136P: C $136P is 4.2% in the money")
+        self.assertEqual(got, "C $136P is 4.2% in the money")
+
+    def test_line_without_duplication_is_untouched(self):
+        from wheelkit.notify import compact
+
+        got = compact("SLV $55P: 93% of max profit captured")
+        self.assertEqual(got, "SLV $55P 93% of max profit captured")
+
+    def test_body_is_capped_and_says_how_many_were_dropped(self):
+        from wheelkit.notify import BANNER_BUDGET, compact
+
+        body = "\n".join(f"SYM{i} $100P: is deep in the money already" for i in range(30))
+        got = compact(body)
+        self.assertLessEqual(len(got), BANNER_BUDGET + 20)
+        self.assertIn("more)", got)
+
+    def test_short_body_is_not_truncated(self):
+        from wheelkit.notify import compact
+
+        got = compact("A: one\nB: two")
+        self.assertNotIn("more)", got)
+        self.assertEqual(len(got.split("\n")), 2)
+
+    def test_dispatch_sends_the_full_body_not_the_first_line(self):
+        from unittest.mock import patch
+
+        from wheelkit.notify import NotifyConfig, dispatch
+        from wheelkit.risk import Finding
+
+        findings = [
+            ("A $1P", [Finding(WARN, "x", "first line")]),
+            ("B $2P", [Finding(WARN, "y", "second line")]),
+        ]
+        with patch("wheelkit.notify.send_banner", return_value=True) as banner:
+            dispatch(findings, NotifyConfig(banner=True, push=False))
+        message = banner.call_args[0][1]
+        self.assertIn("first line", message)
+        self.assertIn("second line", message)
