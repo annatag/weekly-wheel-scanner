@@ -471,3 +471,61 @@ class TestNotifications(unittest.TestCase):
 
         sent = dispatch(self._findings(WARN), NotifyConfig(banner=False, push=False))
         self.assertEqual(sent, {})
+
+
+class TestCoveredCallMath(unittest.TestCase):
+    """Assignment usually arrives underwater; the arithmetic has to show both
+    sides of that, not just refuse the strikes that pay."""
+
+    def _call(self, strike, mid, basis=27.34, contracts=5, dte=36):
+        from datetime import date as _date
+
+        from wheel_covered_call import CallOption
+
+        credit = mid * 100.0 * contracts
+        share = (strike - basis) * 100.0 * contracts
+        capital = basis * 100.0 * contracts
+        return CallOption(
+            strike=strike, expiration=_date(2026, 9, 25), dte=dte,
+            bid=mid - 0.05, ask=mid + 0.05, mid=mid, spread_pct=0.1,
+            volume=10, iv=0.35, delta=0.25, prob_called=0.21,
+            contracts=contracts, credit=credit, below_basis=strike < basis,
+            share_pnl_if_called=share, total_if_called=share + credit,
+            static_return=(credit / capital) * 365 / dte,
+            called_return=((share + credit) / capital) * 365 / dte,
+        )
+
+    def test_basis_is_strike_minus_the_put_credit(self):
+        # Assignment cost the strike, but the put premium was kept, so the
+        # effective basis is below the strike by exactly that credit.
+        self.assertAlmostEqual(28.0 - 0.656, 27.344, places=3)
+
+    def test_a_strike_below_basis_can_still_net_positive(self):
+        # $27 is under a $27.34 basis, yet $358 of premium more than covers
+        # the $172 share loss. A blanket "never below basis" rule hides this.
+        call = self._call(27.0, 0.716)
+        self.assertTrue(call.below_basis)
+        self.assertLess(call.share_pnl_if_called, 0)
+        self.assertGreater(call.total_if_called, 0)
+
+    def test_a_deep_strike_below_basis_does_not_recover(self):
+        call = self._call(24.0, 2.175)
+        self.assertTrue(call.below_basis)
+        self.assertLess(call.total_if_called, 0)
+
+    def test_above_basis_gains_on_both_legs(self):
+        call = self._call(29.0, 0.265)
+        self.assertFalse(call.below_basis)
+        self.assertGreater(call.share_pnl_if_called, 0)
+        self.assertGreater(call.total_if_called, call.credit)
+
+    def test_static_return_ignores_the_share_leg(self):
+        # "If kept" is premium against capital; the shares have not moved.
+        call = self._call(28.0, 0.43)
+        expected = (0.43 * 100 * 5) / (27.34 * 100 * 5) * 365 / 36
+        self.assertAlmostEqual(call.static_return, expected, places=6)
+
+    def test_recovery_cycles_scale_with_the_gap(self):
+        gap_small, gap_large, credit = 925.0, 1850.0, 215.0
+        self.assertAlmostEqual(gap_small / credit, 4.30, places=1)
+        self.assertAlmostEqual(gap_large / credit, 8.60, places=1)

@@ -321,6 +321,36 @@ python wheel_advise.py SOFI --max-dte 45 --target-delta 0.25 --capital 10000
 The advisor deliberately runs looser filters than the scanner. You named the
 ticker, so it shows you the menu rather than returning an empty screen.
 
+### `wheel_covered_call.py` — after you get assigned
+
+Assignment usually happens because the stock fell, so the shares often arrive
+already underwater. That is the case a plain screen handles worst: strikes
+above your basis pay almost nothing, and strikes that pay well would realise
+a loss if called away. This shows both rather than hiding one.
+
+```bash
+python wheel_covered_call.py CCL --assigned-from 28 0.656   # strike, put credit
+python wheel_covered_call.py CCL --shares 500 --basis 27.34
+python wheel_covered_call.py GM                             # basis from the broker
+```
+
+`--assigned-from` derives the basis correctly: assignment cost you the strike,
+but you kept the put premium, so the basis is the strike **minus** that credit.
+
+Each strike is costed three ways — premium if it expires, profit or loss on
+the shares if called away, and the two combined. That last column is the one
+that matters, and it is not monotonic in the obvious way: on a $27.34 basis,
+the $27 strike is below basis yet still nets **+$185** if called, because $358
+of premium more than covers the $172 share loss. A blanket "never sell below
+basis" rule would hide that trade.
+
+Strikes below basis are excluded unless you pass `--allow-below-basis`, and
+always marked with `*` when shown.
+
+There is also recovery math: how many cycles of premium would close an
+underwater gap if the stock goes nowhere — 4.3 cycles, roughly 22 weeks, in
+the CCL example.
+
 ### `wheel_trade_suggestions.py` — is it still good?
 
 Re-quotes the saved scan against the current market and reprices the limits.
