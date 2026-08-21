@@ -160,8 +160,12 @@ def compact(body: str) -> str:
     lines = []
     for line in body.split("\n"):
         label, _, message = line.partition(": ")
-        if message.startswith(label):
-            message = message[len(label):].lstrip()
+        # The label may carry a severity tag ("!! CCL $28P"); compare against
+        # the bare label or the de-duplication silently stops working and the
+        # position is named twice, eating the display budget.
+        bare = label.lstrip("!·· ").strip()
+        if bare and message.startswith(bare):
+            message = message[len(bare):].lstrip()
         lines.append(f"{label} {message}" if message else line)
 
     out = []
@@ -193,14 +197,21 @@ def summarise(findings_by_position: list[tuple[str, list]]) -> tuple[str, str, s
         parts.append(f"{warn} warning{'s' if warn != 1 else ''}")
     subtitle = " · ".join(parts) if parts else "review"
 
-    lines = []
+    # Marked and ordered by severity. The body is truncated to what a
+    # notification will show, so urgent lines must survive that cut - and
+    # a reader counting "1 urgent, 2 warnings" needs to see which is which.
+    marked = []
     for label, findings in findings_by_position:
         worst = next(
             (f for f in findings if f.level == "URGENT"),
             findings[0] if findings else None,
         )
-        if worst is not None:
-            lines.append(f"{label}: {worst.message}")
+        if worst is None:
+            continue
+        rank = {"URGENT": 0, "WARN": 1}.get(worst.level, 2)
+        tag = {"URGENT": "!!", "WARN": "!"}.get(worst.level, "·")
+        marked.append((rank, f"{tag} {label}: {worst.message}"))
+    lines = [text for _, text in sorted(marked, key=lambda m: m[0])]
 
     body = "\n".join(lines[:6])
     if len(lines) > 6:

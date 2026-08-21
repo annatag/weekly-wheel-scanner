@@ -579,3 +579,65 @@ class TestNotificationBody(unittest.TestCase):
         message = banner.call_args[0][1]
         self.assertIn("first line", message)
         self.assertIn("second line", message)
+
+
+class TestAssignmentWording(unittest.TestCase):
+    """Urgency must follow the odds, and the odds must be stated."""
+
+    def _itm(self, dte, delta, spot=85.0):
+        return check_position(
+            symbol="X", right="P", strike=90.0, spot=spot, expiration=SOON,
+            dte=dte, delta=delta, entry_credit=1.0, current_mid=5.0, limits=LIMITS,
+        )[0]
+
+    def test_expiry_day_is_certain_not_a_probability(self):
+        # A cent in the money at the close is auto-exercised; nothing is left
+        # to estimate, so quoting a percentage there would be false precision.
+        f = self._itm(dte=0, delta=-0.97)
+        self.assertEqual(f.level, URGENT)
+        self.assertIn("certain", f.message)
+        self.assertNotIn("chance", f.message)
+
+    def test_deep_itm_is_urgent_even_with_time_left(self):
+        # This is the case that read as a warning: 0.92 delta, seven days.
+        f = self._itm(dte=7, delta=-0.92)
+        self.assertEqual(f.level, URGENT)
+        self.assertIn("92% chance", f.message)
+
+    def test_shallow_itm_with_time_stays_a_warning(self):
+        f = self._itm(dte=10, delta=-0.55, spot=89.0)
+        self.assertEqual(f.level, WARN)
+
+    def test_recovery_odds_are_stated_when_not_certain(self):
+        f = self._itm(dte=7, delta=-0.80)
+        self.assertIn("20% it recovers", f.message)
+
+    def test_short_dated_is_urgent_regardless_of_depth(self):
+        self.assertEqual(self._itm(dte=2, delta=-0.55, spot=89.0).level, URGENT)
+
+    def test_delta_drift_states_the_odds(self):
+        findings = check_position(
+            symbol="X", right="P", strike=90.0, spot=91.0, expiration=SOON,
+            dte=10, delta=-0.58, entry_credit=1.0, current_mid=0.9, limits=LIMITS,
+        )
+        drift = next(f for f in findings if f.code == "delta_drift")
+        self.assertIn("58% chance", drift.message)
+
+    def test_notification_marks_and_orders_by_severity(self):
+        from wheelkit.notify import summarise
+        from wheelkit.risk import Finding
+
+        _, subtitle, body = summarise([
+            ("A $1P", [Finding(WARN, "w", "a warning")]),
+            ("B $2P", [Finding(URGENT, "u", "an urgent thing")]),
+        ])
+        lines = body.split("\n")
+        self.assertTrue(lines[0].startswith("!!"), "urgent must sort first")
+        self.assertTrue(lines[1].startswith("! "))
+        self.assertIn("1 urgent", subtitle)
+
+    def test_severity_tag_does_not_break_label_dedup(self):
+        from wheelkit.notify import compact
+
+        got = compact("!! C $136P: C $136P 5.3% ITM, 0 DTE")
+        self.assertEqual(got.count("C $136P"), 1)

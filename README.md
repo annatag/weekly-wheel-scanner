@@ -224,6 +224,21 @@ Alerts on: a position going in the money, delta past 0.50, 50% of max profit
 captured, the last three days before expiry at a live delta, and a daily move
 over 5% in the underlying.
 
+Severity follows the **odds**, not the calendar. An in-the-money position is
+urgent once assignment odds pass 85% or expiry is within three days; anything
+shallower with time left is a warning. Expiry day is stated as certain rather
+than as a probability, because a cent in the money at the close is
+auto-exercised and there is nothing left to estimate:
+
+```
+!! CCL $28P 7.8% ITM, 7 DTE - ~89% chance of assignment, 11% it recovers
+!! C $136P 5.3% ITM, 0 DTE - assignment is now certain
+ ! HOOD $90P moved +12.7% in a day
+```
+
+`!!` is urgent, `!` a warning, and urgent lines sort first so they survive the
+notification's length cap.
+
 Positions are read from IBKR, Alpaca or `positions.csv`, tried in that order.
 The CSV matters because IBKR only reports while TWS is running, and a monitor
 that silently reports nothing whenever TWS is closed is worse than none.

@@ -58,6 +58,11 @@ class RiskLimits:
 
     # --- while open ---------------------------------------------------
     alert_delta: float = 0.50
+    # Assignment odds that make a position urgent regardless of how much time
+    # is left. Depth used to be invisible to the escalation: a contract 8% in
+    # the money at 0.92 delta was only a warning because it had seven days,
+    # while a shallower one on expiry day was urgent.
+    urgent_assign_prob: float = 0.85
     profit_target_pct: float = 0.50
     gamma_window_dte: int = 3
     underlying_move_alert: float = 0.05
@@ -360,18 +365,40 @@ def check_position(
     itm = (right == "P" and spot < strike) or (right == "C" and spot > strike)
     if itm:
         distance = abs(spot - strike) / strike
+        # Anything a cent in the money at the close is auto-exercised, so on
+        # expiry day the outcome is settled; before that it is a probability,
+        # and delta is the best estimate of it available here.
+        certain = dte <= 0
+        odds = abs_delta if abs_delta == abs_delta else float("nan")
+
+        if certain:
+            level = URGENT
+            verdict = "assignment is now certain"
+        else:
+            level = (
+                URGENT
+                if (odds == odds and odds >= limits.urgent_assign_prob)
+                or dte <= limits.gamma_window_dte
+                else WARN
+            )
+            verdict = (
+                f"~{odds:.0%} chance of assignment"
+                if odds == odds
+                else "assignment likely"
+            )
+            if odds == odds and odds < 0.99:
+                verdict += f", {1 - odds:.0%} it recovers"
+
         out.append(Finding(
-            URGENT if dte <= limits.gamma_window_dte else WARN,
-            "in_the_money",
-            f"{symbol} ${strike:g}{right} is {distance:.1%} in the money "
-            f"with {dte} DTE - assignment is the default outcome",
+            level, "in_the_money",
+            f"{symbol} ${strike:g}{right} {distance:.1%} ITM, {dte} DTE - {verdict}",
         ))
 
     if abs_delta == abs_delta and abs_delta >= limits.alert_delta and not itm:
         out.append(Finding(
             WARN, "delta_drift",
-            f"delta has reached {abs_delta:.2f}; assignment is now more likely "
-            "than not",
+            f"{symbol} ${strike:g}{right} still OTM but delta {abs_delta:.2f} "
+            f"- ~{abs_delta:.0%} chance of assignment, {dte} DTE",
         ))
 
     if entry_credit > 0 and current_mid >= 0:
@@ -387,8 +414,8 @@ def check_position(
         if abs_delta > 0.15:
             out.append(Finding(
                 WARN, "gamma_window",
-                f"{dte} DTE at {abs_delta:.2f} delta - small moves in the "
-                "underlying now swing assignment risk sharply",
+                f"{symbol} ${strike:g}{right} {dte} DTE at {abs_delta:.2f} delta "
+                f"- ~{abs_delta:.0%} assignment odds, and they swing fast now",
             ))
 
     if (
