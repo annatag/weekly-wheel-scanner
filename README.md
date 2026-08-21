@@ -20,17 +20,15 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-mkdir -p ~/.config/wheelscan && chmod 700 ~/.config/wheelscan
-cp .env.example ~/.config/wheelscan/.env
-chmod 600 ~/.config/wheelscan/.env      # then paste your Alpaca keys into it
+python wheel_secrets.py store      # paste your Alpaca keys, input is hidden
+python wheel_secrets.py status     # confirm where they resolve from
 ```
 
-**Credentials live in the macOS Keychain, not on disk.**
+That is the whole setup. **Credentials go in the macOS Keychain, not a file** —
+there is no `.env` to create.
 
 ```bash
-python wheel_secrets.py store      # prompt and save, input never echoed
-python wheel_secrets.py migrate    # move an existing .env in, then shred it
-python wheel_secrets.py status     # show where credentials resolve from
+python wheel_secrets.py migrate    # only if you already have a .env to move in
 ```
 
 Resolved in order: real environment variables, then the Keychain, then
@@ -54,9 +52,13 @@ There is no order-placing code anywhere in this repository.
 Data comes from Alpaca's free tier by default. The tier splits by recency
 rather than by product, so daily bars use `sip` (full consolidated volume)
 while live quotes use `iex`, and options use the `indicative` feed. No paid
-subscription is required. `.env` is gitignored.
+subscription is required.
 
-Run the offline test suite with `python -m unittest test_wheelkit`.
+Run the offline tests — 113 of them, no network — with:
+
+```bash
+python -m unittest test_wheelkit test_risk
+```
 
 ## Weekly routine
 

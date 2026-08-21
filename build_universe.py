@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--max-price",
         type=float,
-        default=200.0,
+        default=150.0,
         help="Highest share price. One contract secures 100 shares, so this "
              "is your per-position cash ceiling divided by 100.",
     )

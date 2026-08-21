@@ -58,7 +58,7 @@ class UniverseFilters:
     min_price: float = 5.0
     # A single contract secures 100 shares, so the sleeve ceiling divided by
     # 100 is the highest strike that fits one contract.
-    max_price: float = 200.0
+    max_price: float = 150.0
     min_dollar_volume: float = 50_000_000
     min_history_days: int = 60
     # You cannot sell meaningful premium on something that does not move.

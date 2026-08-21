@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--right", choices=("put", "call", "both"), default="both")
     p.add_argument("--min-dte", type=int, default=5)
     p.add_argument("--max-dte", type=int, default=45)
-    p.add_argument("--capital", type=float, default=20_000,
+    p.add_argument("--capital", type=float, default=15_000,
                    help="Cash you are willing to secure per put position")
     p.add_argument("--shares", type=float, default=None,
                    help="Shares held, for covered calls. Defaults to the broker position.")
