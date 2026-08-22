@@ -51,10 +51,14 @@ class WheelConfig:
     min_dte: int = 7
     max_dte: int = 21
 
-    # Wider than the original 0.15-0.20 band, which discarded good trades a
-    # few thousandths outside it. Scoring peaks near the middle of the band.
+    # Delta is a gate, not a ranking factor: it is worth at most 2.3 points
+    # of the final score, while premium is worth 22. Left at 0.32 the ranking
+    # therefore drifted to the aggressive end of the band on its own - a scan
+    # returned a top ten with a median delta of 0.26 and only two contracts
+    # anywhere near the 0.20 "ideal". Capping the band is the only thing that
+    # actually holds the conservative end.
     min_abs_delta: float = 0.10
-    max_abs_delta: float = 0.32
+    max_abs_delta: float = 0.22
     ideal_abs_delta: float = 0.20
 
     # Liquidity. Open interest is deliberately absent: the free data tier does
