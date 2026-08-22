@@ -32,7 +32,7 @@ class RiskLimits:
     """Every threshold in one place, so a live account can run tighter."""
 
     # --- entry gate ---------------------------------------------------
-    max_entry_delta: float = 0.32
+    max_entry_delta: float = 0.22
     min_entry_delta: float = 0.10
     min_dte: int = 5
     max_dte: int = 45

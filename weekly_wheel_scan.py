@@ -67,7 +67,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-dte", type=int, default=7)
     p.add_argument("--max-dte", type=int, default=21)
     p.add_argument("--min-delta", type=float, default=0.10)
-    p.add_argument("--max-delta", type=float, default=0.32)
+    p.add_argument("--max-delta", type=float, default=0.22)
     p.add_argument("--max-spread-pct", type=float, default=0.12)
     p.add_argument("--min-vrp", type=float, default=1.0,
                    help="Minimum implied/realised volatility ratio")
