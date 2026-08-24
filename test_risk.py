@@ -670,3 +670,58 @@ class TestCheckReturnLine(unittest.TestCase):
         self.assertEqual(r.binding_constraint, "two-sigma risk budget")
         # A second contract would exceed the 2% budget.
         self.assertGreater(r.stress_loss * 2, lim.account_value * lim.risk_budget_pct)
+
+
+class TestReturnMetrics(unittest.TestCase):
+    """Return alone cannot be compared across contracts at different deltas."""
+
+    def _c(self, roc, delta, dte=11):
+        from datetime import date as _date
+
+        from wheelkit.strategy import Candidate
+
+        return Candidate(
+            symbol="X", right="P", occ_symbol="", expiration=_date(2026, 9, 4),
+            dte=dte, strike=95.0, spot=100.0, bid=0.95, ask=1.01, mid=0.98,
+            spread_pct=0.06, option_volume=50, open_interest=None, iv=0.5,
+            delta=-delta, theta_per_day=-5.0, prob_itm=delta, prob_profit=1 - delta,
+            vrp=1.5, contracts=1, capital=9500.0, credit=98.0, breakeven=94.02,
+            cushion_pct=0.06, cushion_sigmas=0.87, return_on_capital=roc,
+            annualised_return=roc * 365 / dte, trend_score=60.0,
+            avg_dollar_volume=2e8, rv20=0.3, move_5d=0.0, support_20d=90.0,
+            earnings_date=None, quote_age_note="fresh",
+        )
+
+    def test_same_delta_different_pay_is_visible(self):
+        from wheelkit.report import roc_per_delta
+
+        # ASTS and C sat at the same ~0.20 delta and paid 2.5x apart; nothing
+        # on the table showed it before this column existed.
+        rich = roc_per_delta(self._c(0.0223, 0.20))
+        thin = roc_per_delta(self._c(0.0092, 0.21))
+        self.assertGreater(rich / thin, 2.0)
+
+    def test_higher_delta_is_penalised_at_equal_return(self):
+        from wheelkit.report import roc_per_delta
+
+        safe = roc_per_delta(self._c(0.010, 0.18))
+        risky = roc_per_delta(self._c(0.010, 0.41))
+        self.assertGreater(safe, risky)
+
+    def test_roc_per_day_matches_the_annualised_figure(self):
+        from wheelkit.report import roc_per_day
+
+        c = self._c(0.0121, 0.20, dte=11)
+        self.assertAlmostEqual(roc_per_day(c) * 365, c.annualised_return, places=9)
+
+    def test_times_cash_multiple(self):
+        from wheelkit.report import roc_per_day
+
+        c = self._c(0.0121, 0.20, dte=11)
+        self.assertAlmostEqual(roc_per_day(c) / (0.04 / 365), 10.0, places=0)
+
+    def test_zero_delta_does_not_divide_by_zero(self):
+        from wheelkit.report import roc_per_day, roc_per_delta
+
+        self.assertTrue(math.isnan(roc_per_delta(self._c(0.01, 0.0))))
+        self.assertTrue(math.isnan(roc_per_day(self._c(0.01, 0.2, dte=0))))

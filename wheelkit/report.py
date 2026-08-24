@@ -15,6 +15,31 @@ from .strategy import Candidate
 RIGHT_LABEL = {"P": "PUT", "C": "CALL"}
 
 
+def roc_per_delta(candidate) -> float:
+    """Return on capital per unit of assignment probability.
+
+    Return alone cannot be compared across contracts: a 3% return at 0.41
+    delta is a worse trade than 1% at 0.18. Dividing by delta puts them on
+    one scale - two candidates at the same delta can differ by 2.5x here,
+    and nothing else on the table shows it.
+    """
+    delta = abs(candidate.delta)
+    if delta <= 0 or candidate.return_on_capital != candidate.return_on_capital:
+        return float("nan")
+    return candidate.return_on_capital / delta
+
+
+def roc_per_day(candidate) -> float:
+    """Return on capital per day held.
+
+    The honest version of the annualised figure, which assumes the capital is
+    redeployed into an equally good trade the moment this one expires.
+    """
+    if candidate.dte <= 0:
+        return float("nan")
+    return candidate.return_on_capital / candidate.dte
+
+
 def fmt_num(value: float | None, spec: str, dash: str = "-") -> str:
     if value is None or value != value:
         return dash
@@ -47,7 +72,7 @@ def print_scan_table(candidates: list[Candidate]) -> None:
         return
 
     headers = [
-        "#", "Symbol", "Score", "Exp", "DTE", "Strike", "Bid/Ask", "Delta",
+        "#", "Symbol", "Score", "Exp", "DTE", "Strike", "Delta", "ROC/\u0394",
         "IV", "VRP", "Qty", "Credit", "Capital", "Ann.", "P(profit)", "Cushion",
         "Setup",
     ]
@@ -60,8 +85,8 @@ def print_scan_table(candidates: list[Candidate]) -> None:
             c.expiration.strftime("%b %d"),
             str(c.dte),
             f"${c.strike:g}",
-            f"{c.bid:.2f}/{c.ask:.2f}",
             f"{c.delta:+.2f}",
+            fmt_num(roc_per_delta(c), ".1%"),
             fmt_num(c.iv, ".0%"),
             fmt_num(c.vrp, ".2f"),
             str(c.contracts),
@@ -106,8 +131,16 @@ def print_trade_card(candidate: Candidate, *, index: int | None = None) -> None:
     print(f"  BREAKEVEN  ${candidate.breakeven:.2f} "
           f"({candidate.cushion_pct:+.1%} from ${candidate.spot:.2f} spot, "
           f"{fmt_num(candidate.cushion_sigmas, '.2f')}σ of the expected move)")
+    per_day = roc_per_day(candidate)
+    times_cash = per_day / (0.04 / 365) if per_day == per_day else float("nan")
     print(f"  RETURN     {candidate.return_on_capital:.2%} over {candidate.dte} days "
           f"= {fmt_num(candidate.annualised_return, '.1%')} annualised")
+    # Annualising assumes the capital is redeployed the moment this expires,
+    # which it will not be. The multiple of cash is what it earns while the
+    # money is actually committed.
+    print(f"             {fmt_num(per_day, '.3%')}/day = "
+          f"{fmt_num(times_cash, '.0f')}x what the cash earns idle · "
+          f"{fmt_num(roc_per_delta(candidate), '.1%')} per unit of assignment risk")
     print(f"  ODDS       {fmt_num(candidate.prob_profit, '.0%')} chance of profit · "
           f"{fmt_num(candidate.prob_itm, '.0%')} chance of assignment · "
           f"delta {candidate.delta:+.3f}")
@@ -217,10 +250,16 @@ def write_csv(path: Path, candidates: list[Candidate]) -> None:
         subscores = row.pop("subscores", {}) or {}
         row.update({f"score_{k}": round(v, 1) for k, v in subscores.items()})
         limits = build_limit_plan(candidate)
+        per_day = roc_per_day(candidate)
         row.update(
             limit_open=limits.open_at,
             limit_likely=limits.likely_fill,
             limit_floor=limits.walk_floor,
+            roc_per_delta=roc_per_delta(candidate),
+            roc_per_day=per_day,
+            # How many times the risk-free daily rate the capital earns while
+            # it is committed. The comparison the annualised figure obscures.
+            times_cash=per_day / (0.04 / 365) if per_day == per_day else float("nan"),
         )
         rows.append(row)
     with path.open("w", newline="", encoding="utf-8") as handle:
