@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 import tempfile
 import unittest
 from datetime import date, timedelta
@@ -687,7 +688,8 @@ class TestReturnMetrics(unittest.TestCase):
             delta=-delta, theta_per_day=-5.0, prob_itm=delta, prob_profit=1 - delta,
             vrp=1.5, contracts=1, capital=9500.0, credit=98.0, breakeven=94.02,
             cushion_pct=0.06, cushion_sigmas=0.87, return_on_capital=roc,
-            annualised_return=roc * 365 / dte, trend_score=60.0,
+            annualised_return=(roc * 365 / dte) if dte else float("nan"),
+            trend_score=60.0,
             avg_dollar_volume=2e8, rv20=0.3, move_5d=0.0, support_20d=90.0,
             earnings_date=None, quote_age_note="fresh",
         )
