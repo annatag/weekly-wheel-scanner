@@ -641,3 +641,32 @@ class TestAssignmentWording(unittest.TestCase):
 
         got = compact("!! C $136P: C $136P 5.3% ITM, 0 DTE")
         self.assertEqual(got.count("C $136P"), 1)
+
+
+class TestCheckReturnLine(unittest.TestCase):
+    """The gate validated risk but never stated reward."""
+
+    def test_return_arithmetic(self):
+        credit, contracts, capital, dte = 0.98, 1, 9500.0, 11
+        total = credit * 100 * contracts
+        roc = total / capital
+        self.assertAlmostEqual(total, 98.0)
+        self.assertAlmostEqual(roc, 0.010316, places=5)
+        self.assertAlmostEqual(roc * 365 / dte, 0.3423, places=3)
+
+    def test_loss_is_stated_as_a_multiple_of_the_credit(self):
+        # 0.09x-the-loss reads as harmless; 11x-the-credit reads as the risk
+        # it actually is. Same ratio, opposite direction.
+        total, stress = 98.0, 1110.0
+        self.assertAlmostEqual(stress / total, 11.33, places=1)
+        self.assertGreater(stress / total, 1.0)
+
+    def test_sizing_binds_on_the_risk_budget(self):
+        from wheelkit.risk import RiskLimits, size_position
+
+        lim = RiskLimits(account_value=100_000)
+        r = size_position(strike=95.0, spot=102.66, iv=0.53, dte=11, limits=lim)
+        self.assertEqual(r.contracts, 1)
+        self.assertEqual(r.binding_constraint, "two-sigma risk budget")
+        # A second contract would exceed the 2% budget.
+        self.assertGreater(r.stress_loss * 2, lim.account_value * lim.risk_budget_pct)

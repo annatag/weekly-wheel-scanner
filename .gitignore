@@ -9,3 +9,5 @@ wheel_trade_suggestions.csv
 universe/
 positions.csv
 logs/
+shares.csv
+positions.csv.bak

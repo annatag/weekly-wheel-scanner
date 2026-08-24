@@ -151,11 +151,12 @@ def send_push(
 BANNER_BUDGET = 240
 
 
-def compact(body: str) -> str:
-    """Squeeze the summary into what a notification will actually display.
+def dedupe(body: str) -> str:
+    """Drop the position label where the message already names it.
 
-    Each line already repeats the position label that its message also names
-    ("C $136P: C $136P is 4.2% in the money"), which wastes half the budget.
+    summarise() prefixes each line with the position and the finding message
+    names it again, so the raw body reads "C $136P: C $136P is 4.2% ITM".
+    Every channel wants this, not just the length-capped one.
     """
     lines = []
     for line in body.split("\n"):
@@ -167,8 +168,13 @@ def compact(body: str) -> str:
         if bare and message.startswith(bare):
             message = message[len(bare):].lstrip()
         lines.append(f"{label} {message}" if message else line)
+    return "\n".join(lines)
 
-    out = []
+
+def compact(body: str) -> str:
+    """De-duplicate, then trim to what a notification banner will show."""
+    lines = dedupe(body).split("\n")
+    out: list[str] = []
     used = 0
     for line in lines:
         if used + len(line) + 1 > BANNER_BUDGET:
@@ -243,7 +249,7 @@ def dispatch(
         sent["banner"] = send_banner(title, compact(body), subtitle)
     if config.push and config.topic:
         sent["push"] = send_push(
-            body,
+            dedupe(body),
             title=f"{title} — {subtitle}",
             topic=config.topic,
             server=config.server,

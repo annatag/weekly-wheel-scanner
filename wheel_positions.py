@@ -211,9 +211,25 @@ def run_check(args: argparse.Namespace, provider: AlpacaProvider,
     if sizing:
         print(f"  Suggested size: {sizing.contracts} contract(s), "
               f"${sizing.capital:,.0f} secured")
+
+        # The gate validates risk but said nothing about reward, so judging
+        # whether the credit justified the capital meant doing the division
+        # by hand - against the stress loss printed on the next line.
+        total_credit = credit * 100 * sizing.contracts
+        roc = total_credit / sizing.capital if sizing.capital > 0 else float("nan")
+        annualised = roc * 365 / dte if dte > 0 else float("nan")
+        # Stated as a multiple of the credit rather than a fraction of the
+        # loss: "11x the credit" is the direction that means something when
+        # you are deciding whether to take the trade.
+        loss_multiple = (
+            sizing.stress_loss / total_credit if total_credit > 0 else float("nan")
+        )
+        print(f"    Credit ${total_credit:,.0f} on ${sizing.capital:,.0f} "
+              f"= {roc:.2%} over {dte} days = {fmt_num(annualised, '.0%')} annualised")
         print(f"    limited by {sizing.binding_constraint}; a two-sigma "
               f"{sizing.stress_move_pct:.1%} drop would cost "
-              f"${sizing.stress_loss:,.0f}")
+              f"${sizing.stress_loss:,.0f}"
+              f" - {fmt_num(loss_multiple, '.0f')}x the credit")
     else:
         findings.append(Finding(
             URGENT, "unsizeable",
