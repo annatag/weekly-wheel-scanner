@@ -11,3 +11,5 @@ positions.csv
 logs/
 shares.csv
 positions.csv.bak
+fills.csv
+fills.csv.tmp

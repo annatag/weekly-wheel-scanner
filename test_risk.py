@@ -954,3 +954,104 @@ class TestCorrelatedExposure(unittest.TestCase):
 
         self.assertIn("china", groups_for("NIO"))
         self.assertIn("ev and clean energy", groups_for("NIO"))
+
+
+class TestFillLog(unittest.TestCase):
+    """A recommendation you did not take cannot grade the recommender."""
+
+    def setUp(self):
+        from wheelkit.fills import Fill
+
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.path = Path(self.dir.name) / "fills.csv"
+        self.Fill = Fill
+
+    def _fill(self, **kw):
+        base = dict(
+            recorded_at=date(2026, 9, 2), symbol="GDX", right="P",
+            expiration=date(2026, 9, 4), strike=95.0, contracts=1,
+            fill_credit=1.03, scan_file="wheel_scan_results.csv",
+            scan_date=date(2026, 8, 24),
+            suggested_expiration=date(2026, 9, 4), suggested_strike=95.0,
+            suggested_mid=1.03, suggested_limit_likely=1.03,
+        )
+        base.update(kw)
+        return self.Fill(**base)
+
+    def test_a_fill_matching_the_suggestion_has_no_drift(self):
+        from wheelkit.fills import compute_drift
+
+        self.assertEqual(compute_drift(self._fill()), "")
+
+    def test_a_moved_strike_is_drift(self):
+        from wheelkit.fills import compute_drift
+
+        drift = compute_drift(self._fill(strike=90.0))
+        self.assertIn("strike", drift)
+
+    def test_a_moved_expiry_is_drift(self):
+        from wheelkit.fills import compute_drift
+
+        drift = compute_drift(self._fill(expiration=date(2026, 9, 18)))
+        self.assertIn("expiry", drift)
+
+    def test_a_worse_fill_than_the_ladder_is_drift(self):
+        from wheelkit.fills import compute_drift
+
+        drift = compute_drift(self._fill(fill_credit=0.70))
+        self.assertIn("below", drift)
+
+    def test_a_penny_of_slippage_is_not_drift(self):
+        from wheelkit.fills import compute_drift
+
+        self.assertEqual(compute_drift(self._fill(fill_credit=1.02)), "")
+
+    def test_a_trade_with_no_scan_is_logged_but_not_graded(self):
+        from wheelkit.fills import compute_drift
+
+        fill = self._fill(scan_file="", scan_date=None)
+        self.assertEqual(compute_drift(fill), "")
+        self.assertFalse(fill.matches_suggestion)
+
+    def test_round_trip_through_the_file_preserves_everything(self):
+        from wheelkit.fills import append_fill, load_fills
+
+        append_fill(self._fill(), self.path)
+        append_fill(self._fill(symbol="FCX", strike=71.0), self.path)
+        loaded = load_fills(self.path)
+        self.assertEqual([f.symbol for f in loaded], ["GDX", "FCX"])
+        self.assertEqual(loaded[0].scan_date, date(2026, 8, 24))
+        self.assertEqual(loaded[0].suggested_strike, 95.0)
+
+    def test_closing_computes_what_was_kept(self):
+        fill = self._fill()
+        fill.outcome, fill.close_debit = "closed", 0.31
+        self.assertAlmostEqual(fill.realised, 72.0)
+        self.assertAlmostEqual(fill.captured_pct, (1.03 - 0.31) / 1.03)
+
+    def test_an_open_fill_has_no_realised_number(self):
+        fill = self._fill()
+        self.assertNotEqual(fill.realised, fill.realised)
+
+    def test_find_open_ignores_closed_rows(self):
+        from wheelkit.fills import append_fill, find_open, load_fills
+
+        closed = self._fill()
+        closed.outcome = "expired"
+        append_fill(closed, self.path)
+        self.assertIsNone(
+            find_open(load_fills(self.path), "GDX", date(2026, 9, 4), 95.0, "P")
+        )
+
+    def test_the_nearest_strike_is_the_match(self):
+        from wheelkit.fills import Suggestion, best_match
+
+        options = [
+            Suggestion("GDX", "P", date(2026, 9, 4), 95.0, 1.03, 1.03,
+                       -0.18, 11, 71.5),
+            Suggestion("GDX", "P", date(2026, 9, 4), 92.0, 0.61, 0.61,
+                       -0.12, 11, 68.0),
+        ]
+        self.assertEqual(best_match(options, "GDX", "P", 92.5).strike, 92.0)
+        self.assertIsNone(best_match(options, "FCX", "P", 71.0))
