@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import textwrap
 from pathlib import Path
 
 from wheelkit.earnings import EarningsCalendar
@@ -31,7 +32,9 @@ from wheelkit.strategy import WheelConfig
 from wheelkit.universe import (
     DEFAULT_UNIVERSE_PATH,
     build_universe_file,
+    read_filters_file,
     read_symbols_file,
+    sleeve_mismatch,
 )
 
 DEFAULT_SYMBOLS = [
@@ -63,7 +66,9 @@ def parse_args() -> argparse.Namespace:
     )
 
     p.add_argument("--min-cash", type=float, default=3_000)
-    p.add_argument("--max-cash", type=float, default=15_000)
+    p.add_argument("--max-cash", type=float, default=22_000,
+                   help="Cash one position may secure. Equals the universe's "
+                        "--max-price x 100; change one and change the other.")
     p.add_argument("--min-dte", type=int, default=7)
     p.add_argument("--max-dte", type=int, default=21)
     p.add_argument("--min-delta", type=float, default=0.10)
@@ -101,8 +106,46 @@ def parse_args() -> argparse.Namespace:
                    help="Permit several strikes on the same ticker in the top N")
     p.add_argument("--offline-earnings", action="store_true",
                    help="Skip the earnings feed and use earnings.csv only")
+    p.add_argument("--allow-sleeve-mismatch", action="store_true",
+                   help="Scan anyway when the universe admits stocks the cash "
+                        "sleeve cannot secure")
     p.add_argument("--quiet", action="store_true")
     return p.parse_args()
+
+
+def check_sleeve(args: argparse.Namespace) -> int | None:
+    """Refuse to scan a universe the sleeve could never buy from.
+
+    The universe and the sleeve are set by two different commands with two
+    different defaults, so they drift. When they do, the scan quietly spends
+    its whole run pricing contracts it rejects at sizing, and the only trace
+    is a reject bucket nobody reads. Returns an exit code to stop on, or None.
+    """
+    built = read_filters_file(args.symbols_file)
+    ceiling = built.get("max_price")
+    if ceiling is None:
+        return None
+
+    problem = sleeve_mismatch(ceiling, args.max_cash)
+    if problem is None:
+        return None
+
+    severity, message = problem
+    label = "WARNING" if severity == "warning" or args.allow_sleeve_mismatch \
+        else "REFUSING TO SCAN"
+    print("", file=sys.stderr)
+    print("=" * 72, file=sys.stderr)
+    print(f"{label}: the universe and the cash sleeve disagree.", file=sys.stderr)
+    print("", file=sys.stderr)
+    for line in textwrap.wrap(message, 68):
+        print(f"  {line}", file=sys.stderr)
+    print("=" * 72, file=sys.stderr)
+    print("", file=sys.stderr)
+
+    if severity == "error" and not args.allow_sleeve_mismatch:
+        print("Pass --allow-sleeve-mismatch to scan anyway.", file=sys.stderr)
+        return 2
+    return None
 
 
 def _rebuild_command(path: Path) -> str:
@@ -220,6 +263,9 @@ def main() -> int:
         print(f"Universe: {len(symbols)} stock(s) from Finviz\n")
     else:
         symbols = load_symbols(args)
+        problem = check_sleeve(args)
+        if problem is not None:
+            return problem
 
     positions: dict[str, tuple[float, float]] = {}
     if right == "C":

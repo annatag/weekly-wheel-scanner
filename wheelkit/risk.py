@@ -54,10 +54,18 @@ class RiskLimits:
     # Most that one adverse two-sigma move may cost, as a share of account.
     risk_budget_pct: float = 0.02
     max_contracts_per_position: int = 10
-    max_capital_per_position_pct: float = 0.15
+    # One position may secure the sleeve, and the sleeve is set by the most
+    # expensive stock the universe admits: $220 x 100 = $22,000, which is 22%
+    # of a $100,000 account. Raising the price ceiling and leaving this at 15%
+    # would have the scanner recommend trades the gate then refuses to size.
+    max_capital_per_position_pct: float = 0.22
 
     # --- portfolio ----------------------------------------------------
-    max_open_positions: int = 8
+    # A $22,000 sleeve and a 60% total-capital cap fit two full-size positions
+    # and a third smaller one. Eight was arithmetic left over from a $15,000
+    # sleeve; leaving it there would have described a diversification the
+    # account can no longer hold.
+    max_open_positions: int = 3
     max_total_capital_pct: float = 0.60
     max_positions_per_symbol: int = 1
     max_positions_per_sector: int = 3

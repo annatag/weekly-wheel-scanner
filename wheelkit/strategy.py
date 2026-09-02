@@ -41,7 +41,10 @@ class WheelConfig:
     # Sizing: total capital committed per position, filled with multiple
     # contracts when the underlying is cheap enough.
     min_cash: float = 3_000
-    max_cash: float = 15_000
+    # Cash a single position may secure. This is the universe's --max-price
+    # times 100: one contract on the most expensive stock the screen admits.
+    # The two move together or the scan rejects names the universe just let in.
+    max_cash: float = 22_000
     # When set, a single contract that exceeds the sleeve is still returned
     # rather than dropped. The scanner leaves this off so the ranking respects
     # position sizing; the advisor turns it on because the user named the
