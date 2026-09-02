@@ -17,6 +17,7 @@ from pathlib import Path
 
 from wheelkit.analytics import compute_stats
 from wheelkit.earnings import EarningsCalendar
+from wheelkit.fills import DEFAULT_FILLS_FILE, entry_date_for, entry_date_index
 from wheelkit.netio import FetchError
 from wheelkit.notify import NotifyConfig, dispatch
 from wheelkit.positions import (
@@ -71,6 +72,10 @@ def parse_args() -> argparse.Namespace:
                    help="Send a test notification through every channel and exit")
     p.add_argument("--earnings-file", type=Path, default=Path("earnings.csv"))
     p.add_argument("--offline-earnings", action="store_true")
+    p.add_argument("--fills-file", type=Path, default=DEFAULT_FILLS_FILE,
+                   help="Fill log, used for entry dates the broker does not "
+                        "report. Without one the checkpoint falls back to a "
+                        "flat DTE, which is early for a short-dated trade.")
     p.add_argument(
         "--check", nargs=5, metavar=("SYMBOL", "STRIKE", "RIGHT", "EXPIRY", "CREDIT"),
         help="Validate a trade before placing it, e.g. --check GM 87 P 2026-08-21 1.09",
@@ -307,6 +312,30 @@ def main() -> int:
                   f"{args.positions_file} with columns "
                   "symbol,expiration,strike,right,quantity,entry_credit")
         return 0
+
+    # A broker reports what you hold, not when you opened it, and TWS's
+    # execution history does not reach back past the current session. So the
+    # original length of a trade comes from the fill log, and where it is
+    # missing the checkpoint says so rather than quietly using a date that has
+    # already passed.
+    dated = 0
+    index = entry_date_index(args.fills_file)
+    for position in positions:
+        if position.entry_date is None:
+            position.entry_date = entry_date_for(
+                index, position.symbol, position.right,
+                position.expiration, position.strike,
+            )
+        dated += position.entry_date is not None
+
+    undated = len(positions) - dated
+    if undated and not args.alerts_only:
+        print(f"note: {undated} of {len(positions)} position(s) have no entry "
+              f"date, so their checkpoint falls back to "
+              f"{limits.time_stop_dte} DTE rather than half the trade's life.")
+        print(f"      Record fills with wheel_fills.py, or add an entry_date "
+              f"column to {args.positions_file}.")
+        print()
 
     for position in positions:
         position.findings = check_position(

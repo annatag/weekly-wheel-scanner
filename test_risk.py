@@ -1262,3 +1262,125 @@ class TestSleeveAndUniverseAgree(unittest.TestCase):
         limits = RiskLimits(account_value=100_000)
         allowed = limits.account_value * limits.max_capital_per_position_pct
         self.assertGreaterEqual(allowed, WheelConfig().max_cash)
+
+
+class TestShareLoading(unittest.TestCase):
+    """A covered call written against the wrong basis is a silent loss."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.path = Path(self.dir.name) / "shares.csv"
+
+    def test_reads_shares_and_basis(self):
+        from wheelkit.positions import read_shares_csv
+
+        self.path.write_text(
+            "# comment\nsymbol,shares,basis,acquired,note\n"
+            "C,100,135.19,2026-08-21,assigned from the 136 put\n",
+            encoding="utf-8",
+        )
+        lot = read_shares_csv(self.path)["C"]
+        self.assertEqual(lot.shares, 100)
+        self.assertEqual(lot.basis, 135.19)
+        self.assertEqual(lot.acquired, date(2026, 8, 21))
+        self.assertEqual(lot.source, "csv")
+
+    def test_missing_file_is_empty_not_an_error(self):
+        from wheelkit.positions import read_shares_csv
+
+        self.assertEqual(read_shares_csv(self.path), {})
+
+    def test_a_row_without_a_basis_is_skipped(self):
+        from wheelkit.positions import read_shares_csv
+
+        self.path.write_text("symbol,shares,basis\nC,100,\n", encoding="utf-8")
+        self.assertEqual(read_shares_csv(self.path), {})
+
+    def test_an_explicit_source_does_not_fall_back(self):
+        from wheelkit.positions import load_shares
+
+        self.path.write_text(
+            "symbol,shares,basis\nC,100,135.19\n", encoding="utf-8")
+        lots, report = load_shares("csv", path=self.path)
+        self.assertEqual(report.used, "csv")
+        self.assertEqual(lots["C"].basis, 135.19)
+
+    def test_the_file_source_is_not_reported_as_live(self):
+        # The whole point of the report: a hand-typed basis has to announce
+        # itself. This book carried $135.19 for a lot IBKR priced at $132.17.
+        from wheelkit.positions import load_shares
+
+        self.path.write_text(
+            "symbol,shares,basis\nC,100,135.19\n", encoding="utf-8")
+        _, report = load_shares("csv", path=self.path)
+        self.assertFalse(report.is_live)
+
+
+class TestEntryDatesFromFills(unittest.TestCase):
+    """The broker knows what you hold, not when you opened it."""
+
+    def setUp(self):
+        from wheelkit.fills import Fill
+
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.path = Path(self.dir.name) / "fills.csv"
+        self.Fill = Fill
+
+    def _log(self, **kw):
+        from wheelkit.fills import append_fill
+
+        base = dict(
+            recorded_at=date(2026, 8, 21), symbol="C", right="C",
+            expiration=date(2026, 9, 11), strike=138.0, contracts=1,
+            fill_credit=0.99,
+        )
+        base.update(kw)
+        append_fill(self.Fill(**base), self.path)
+
+    def test_a_logged_contract_supplies_its_entry_date(self):
+        from wheelkit.fills import entry_date_for, entry_date_index
+
+        self._log()
+        index = entry_date_index(self.path)
+        self.assertEqual(
+            entry_date_for(index, "C", "C", date(2026, 9, 11), 138.0),
+            date(2026, 8, 21),
+        )
+
+    def test_an_unlogged_contract_returns_nothing(self):
+        from wheelkit.fills import entry_date_for, entry_date_index
+
+        self._log()
+        index = entry_date_index(self.path)
+        self.assertIsNone(
+            entry_date_for(index, "GDX", "P", date(2026, 9, 4), 95.0))
+
+    def test_the_strike_must_match_exactly(self):
+        from wheelkit.fills import entry_date_for, entry_date_index
+
+        self._log()
+        index = entry_date_index(self.path)
+        self.assertIsNone(
+            entry_date_for(index, "C", "C", date(2026, 9, 11), 137.0))
+
+    def test_a_re_entered_contract_keeps_the_earliest_date(self):
+        from wheelkit.fills import entry_date_for, entry_date_index
+
+        self._log(recorded_at=date(2026, 8, 28))
+        self._log(recorded_at=date(2026, 8, 21))
+        index = entry_date_index(self.path)
+        self.assertEqual(
+            entry_date_for(index, "C", "C", date(2026, 9, 11), 138.0),
+            date(2026, 8, 21),
+        )
+
+    def test_the_entry_date_shortens_the_checkpoint(self):
+        # Entered 21 DTE, so the checkpoint is 10 DTE - not the flat 21, which
+        # on this trade resolves to a date that has already passed.
+        from wheelkit.risk import checkpoint_dte_for
+
+        expiry = date(2026, 9, 11)
+        self.assertEqual(checkpoint_dte_for(expiry, date(2026, 8, 21), LIMITS), 10)
+        self.assertEqual(checkpoint_dte_for(expiry, None, LIMITS), 21)

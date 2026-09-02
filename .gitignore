@@ -13,3 +13,5 @@ shares.csv
 positions.csv.bak
 fills.csv
 fills.csv.tmp
+positions.csv.bak*
+shares.csv.bak*

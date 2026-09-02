@@ -21,6 +21,7 @@ from .pricing import compute_greeks, implied_vol
 from .providers import ALPACA_DATA_URL, AlpacaProvider, parse_occ
 
 DEFAULT_POSITIONS_FILE = Path("positions.csv")
+DEFAULT_SHARES_FILE = Path("shares.csv")
 
 
 def occ_symbol(symbol: str, expiration: date, right: str, strike: float) -> str:
@@ -365,6 +366,147 @@ def load_positions(
     finally:
         ib_logger.setLevel(previous)
     return [], report
+
+
+@dataclass
+class ShareLot:
+    """Stock held, with the cost the covered-call planner prices against."""
+
+    symbol: str
+    shares: float
+    basis: float
+    source: str = "csv"
+    acquired: date | None = None
+    note: str = ""
+
+
+def read_shares_csv(path: Path = DEFAULT_SHARES_FILE) -> dict[str, ShareLot]:
+    """Columns: symbol,shares,basis[,acquired,note]."""
+    if not path.exists():
+        return {}
+    lines = [
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    out: dict[str, ShareLot] = {}
+    for row in csv.DictReader(lines):
+        symbol = (row.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        try:
+            shares = float(row["shares"])
+            basis = float(row["basis"])
+        except (KeyError, ValueError):
+            continue
+        try:
+            acquired = date.fromisoformat((row.get("acquired") or "").strip())
+        except ValueError:
+            acquired = None
+        out[symbol] = ShareLot(symbol, shares, basis, "csv", acquired,
+                               (row.get("note") or "").strip())
+    return out
+
+
+def read_shares_ibkr(
+    host: str = "127.0.0.1", port: int = 7497, client_id: int = 25
+) -> dict[str, ShareLot]:
+    """Stock positions from TWS, with the broker's own average cost.
+
+    The broker's number is the one that matters. A hand-typed basis drifts
+    from it silently - this book carried $135.19 for a lot IBKR priced at
+    $132.17, a $302 error on 100 shares - and the covered-call planner gates
+    every strike on that figure.
+    """
+    from ib_async import IB
+
+    ib = IB()
+    try:
+        ib.connect(host, port, clientId=client_id, readonly=True, timeout=12)
+    except Exception as exc:
+        raise FetchError(
+            f"Could not reach TWS on {host}:{port} ({exc}). Start TWS, or use "
+            "--source csv."
+        ) from exc
+    try:
+        out: dict[str, ShareLot] = {}
+        for item in ib.positions():
+            contract = item.contract
+            if getattr(contract, "secType", "") != "STK":
+                continue
+            shares = float(item.position)
+            if shares <= 0:
+                continue
+            symbol = str(contract.symbol).upper()
+            out[symbol] = ShareLot(
+                symbol, shares, float(item.avgCost or 0.0), "ibkr"
+            )
+        return out
+    finally:
+        ib.disconnect()
+
+
+def read_shares_alpaca(provider: AlpacaProvider) -> dict[str, ShareLot]:
+    return {
+        symbol: ShareLot(symbol, held[0], held[1], "alpaca")
+        for symbol, held in provider.positions().items()
+    }
+
+
+def load_shares(
+    source: str = "auto",
+    *,
+    provider: AlpacaProvider | None = None,
+    path: Path = DEFAULT_SHARES_FILE,
+    host: str = "127.0.0.1",
+    port: int = 7497,
+) -> tuple[dict[str, ShareLot], SourceReport]:
+    """Shares held, from the broker where possible, and say which one.
+
+    Same order and the same reporting as ``load_positions``: a covered call
+    written against the wrong basis is the mirror of a put sold outside the
+    delta band, and both start with the tool quietly using a number the
+    account does not agree with.
+    """
+    report = SourceReport()
+
+    def _one(name: str) -> dict[str, ShareLot]:
+        if name == "csv":
+            return read_shares_csv(path)
+        if name == "alpaca":
+            if provider is None:
+                raise FetchError("Alpaca provider required for --source alpaca")
+            return read_shares_alpaca(provider)
+        if name == "ibkr":
+            return read_shares_ibkr(host, port)
+        raise ValueError(f"unknown source {name!r}")
+
+    if source != "auto":
+        found = _one(source)
+        report.used = source
+        report.attempts.append((source, f"{len(found)} holding(s)"))
+        return found, report
+
+    import logging
+
+    ib_logger = logging.getLogger("ib_async")
+    previous = ib_logger.level
+    ib_logger.setLevel(logging.CRITICAL)
+    try:
+        for candidate in ("ibkr", "alpaca", "csv"):
+            try:
+                found = _one(candidate)
+            except Exception as exc:
+                report.attempts.append((candidate, _short_reason(exc)))
+                continue
+            if found:
+                report.attempts.append((candidate, f"{len(found)} holding(s)"))
+                report.used = candidate
+                return found, report
+            report.attempts.append((candidate, "no holdings"))
+    finally:
+        ib_logger.setLevel(previous)
+    return {}, report
 
 
 def _short_reason(exc: Exception) -> str:
