@@ -141,10 +141,14 @@ class TestPortfolio(unittest.TestCase):
 
 class TestOpenPositionAlerts(unittest.TestCase):
     def _pos(self, **kw):
+        # Expiry is derived from the DTE the test asks for, so a case that
+        # overrides one is not silently contradicting the other. The time
+        # stop reads the expiry date and the gamma checks read the DTE.
+        dte = kw.pop("dte", 28)
         base = dict(
             symbol="XYZ", right="P", strike=90.0, spot=100.0,
-            expiration=SOON, dte=14, delta=-0.20, entry_credit=1.00,
-            current_mid=0.90, limits=LIMITS,
+            expiration=date.today() + timedelta(days=dte), dte=dte,
+            delta=-0.20, entry_credit=1.00, current_mid=0.90, limits=LIMITS,
         )
         base.update(kw)
         return check_position(**base)
@@ -727,3 +731,226 @@ class TestReturnMetrics(unittest.TestCase):
 
         self.assertTrue(math.isnan(roc_per_delta(self._c(0.01, 0.0))))
         self.assertTrue(math.isnan(roc_per_day(self._c(0.01, 0.2, dte=0))))
+
+
+class TestTradingCalendar(unittest.TestCase):
+    """Deadlines have to land on days the market is actually open."""
+
+    def test_weekend_deadline_resolves_backwards(self):
+        # A checkpoint that lands on a weekend goes back to the Friday, not
+        # forward to the Monday: forward is already later than the rule asked.
+        from wheelkit.tradingdays import deadline_for_dte
+
+        # 21 days before Sun 11 Oct 2026 is Sun 20 Sep -> Fri 18 Sep.
+        self.assertEqual(deadline_for_dte(date(2026, 10, 11), 21), date(2026, 9, 18))
+        self.assertEqual(deadline_for_dte(date(2026, 9, 20), 0), date(2026, 9, 18))
+
+    def test_holiday_deadline_resolves_backwards(self):
+        from wheelkit.tradingdays import deadline_for_dte
+
+        # Thanksgiving 2026 is Thu 26 Nov; the session before is Wed 25 Nov.
+        self.assertEqual(deadline_for_dte(date(2026, 11, 26), 0), date(2026, 11, 25))
+
+    def test_deadline_is_never_later_than_the_rule_asks(self):
+        from wheelkit.tradingdays import deadline_for_dte
+
+        for offset in range(0, 120):
+            expiry = date(2026, 9, 1) + timedelta(days=offset)
+            deadline = deadline_for_dte(expiry, 21)
+            self.assertLessEqual(deadline, expiry - timedelta(days=21))
+
+    def test_holidays_follow_the_nyse_rules(self):
+        from wheelkit.tradingdays import is_trading_day, market_holidays
+
+        self.assertIn(date(2026, 4, 3), market_holidays(2026))    # Good Friday
+        self.assertIn(date(2026, 7, 3), market_holidays(2026))    # Jul 4 is a Sat
+        self.assertIn(date(2026, 11, 26), market_holidays(2026))  # Thanksgiving
+        self.assertFalse(is_trading_day(date(2026, 9, 7)))        # Labor Day
+        self.assertTrue(is_trading_day(date(2026, 9, 8)))
+
+    def test_new_year_on_a_saturday_does_not_close_the_friday(self):
+        # 1 Jan 2028 is a Saturday. The exchange stays open 31 Dec 2027 rather
+        # than shutting the last session of the year.
+        from wheelkit.tradingdays import is_trading_day
+
+        self.assertTrue(is_trading_day(date(2027, 12, 31)))
+
+
+class TestTimeStop(unittest.TestCase):
+    """Only the trades that have not paid their way get raised."""
+
+    def _at_checkpoint(self, captured, dte=14, **kw):
+        credit = 1.00
+        base = dict(
+            symbol="GDX", right="P", strike=90.0, spot=100.0,
+            expiration=date.today() + timedelta(days=dte), dte=dte,
+            delta=-0.18, entry_credit=credit,
+            current_mid=credit * (1 - captured), limits=LIMITS,
+        )
+        base.update(kw)
+        return check_position(**base)
+
+    def test_a_laggard_at_the_checkpoint_is_flagged(self):
+        # GDX sat at 29.8% of its credit at the checkpoint and kept sitting.
+        self.assertIn("time_stop", codes(self._at_checkpoint(0.298)))
+
+    def test_a_winner_at_the_checkpoint_is_left_alone(self):
+        # DRAM was already past 66% and closed at 90%. A flat "close at 21 DTE"
+        # rule would have interrupted a trade that needed no decision.
+        self.assertNotIn("time_stop", codes(self._at_checkpoint(0.66)))
+
+    def test_silent_before_the_checkpoint(self):
+        self.assertNotIn("time_stop", codes(self._at_checkpoint(0.05, dte=40)))
+
+    def test_the_message_names_the_shortfall_and_the_deadline(self):
+        finding = next(
+            f for f in self._at_checkpoint(0.10) if f.code == "time_stop"
+        )
+        self.assertIn("10%", finding.message)
+        self.assertIn("checkpoint", finding.message)
+
+    def test_every_checkpoint_it_can_quote_is_a_trading_day(self):
+        from wheelkit.tradingdays import deadline_for_dte, is_trading_day
+
+        for offset in range(0, 400):
+            expiry = date(2026, 1, 1) + timedelta(days=offset)
+            self.assertTrue(is_trading_day(deadline_for_dte(expiry, 21)))
+
+    def test_the_gamma_window_speaks_instead(self):
+        # Inside three days the question is assignment, not whether it worked.
+        self.assertNotIn("time_stop", codes(self._at_checkpoint(0.05, dte=2)))
+
+    def test_missing_entry_credit_says_so_rather_than_guessing(self):
+        findings = self._at_checkpoint(0.10, entry_credit=0.0)
+        self.assertIn("time_stop_unknown", codes(findings))
+
+    def test_the_threshold_is_configurable(self):
+        loose = RiskLimits(account_value=100_000, time_stop_min_capture=0.20)
+        self.assertNotIn(
+            "time_stop", codes(self._at_checkpoint(0.25, limits=loose))
+        )
+
+
+class TestCheckpointLength(unittest.TestCase):
+    """A 21-DTE checkpoint is already in the past on a two-week trade."""
+
+    def _pos(self, entry_date, dte, captured=0.10):
+        return check_position(
+            symbol="GDX", right="P", strike=90.0, spot=100.0,
+            expiration=date.today() + timedelta(days=dte), dte=dte,
+            delta=-0.18, entry_credit=1.00, current_mid=1.00 * (1 - captured),
+            entry_date=entry_date, limits=LIMITS,
+        )
+
+    def test_a_fresh_short_dated_trade_is_not_immediately_flagged(self):
+        # Opened at 16 DTE and one day old. Its checkpoint is 8 DTE, not 21,
+        # so it has a week to work before anyone asks about it.
+        self.assertNotIn(
+            "time_stop",
+            codes(self._pos(entry_date=date.today() - timedelta(days=1), dte=15)),
+        )
+
+    def test_the_same_trade_is_flagged_once_it_reaches_the_checkpoint(self):
+        self.assertIn(
+            "time_stop",
+            codes(self._pos(entry_date=date.today() - timedelta(days=10), dte=6)),
+        )
+
+    def test_the_cap_still_binds_on_a_long_dated_trade(self):
+        from wheelkit.risk import checkpoint_dte_for
+
+        opened = date.today() - timedelta(days=5)
+        expiry = date.today() + timedelta(days=55)
+        self.assertEqual(checkpoint_dte_for(expiry, opened, LIMITS), 21)
+
+    def test_the_checkpoint_matches_the_trade_card_rule(self):
+        # orders.build_management_plan uses min(21, max(3, dte // 2)); the
+        # monitor must not disagree with the plan the card printed.
+        from wheelkit.risk import checkpoint_dte_for
+
+        for original in (7, 10, 16, 21, 30, 45):
+            expiry = date.today() + timedelta(days=original)
+            expected = min(21, max(LIMITS.gamma_window_dte + 1, original // 2))
+            self.assertEqual(
+                checkpoint_dte_for(expiry, date.today(), LIMITS), expected
+            )
+
+    def test_without_an_entry_date_it_falls_back_to_the_flat_cap(self):
+        from wheelkit.risk import checkpoint_dte_for
+
+        expiry = date.today() + timedelta(days=16)
+        self.assertEqual(checkpoint_dte_for(expiry, None, LIMITS), 21)
+
+    def test_the_entry_date_column_is_optional(self):
+        path = Path(tempfile.mkdtemp()) / "positions.csv"
+        path.write_text(
+            "symbol,expiration,strike,right,quantity,entry_credit\n"
+            "CCL,2026-09-18,28,P,-5,0.656\n",
+            encoding="utf-8",
+        )
+        self.assertIsNone(read_positions_csv(path)[0].entry_date)
+
+    def test_the_entry_date_column_is_read_when_present(self):
+        path = Path(tempfile.mkdtemp()) / "positions.csv"
+        path.write_text(
+            "symbol,expiration,strike,right,quantity,entry_credit,entry_date\n"
+            "CCL,2026-09-18,28,P,-5,0.656,2026-09-02\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(read_positions_csv(path)[0].entry_date, date(2026, 9, 2))
+
+
+class TestCorrelatedExposure(unittest.TestCase):
+    """Sector labels cannot see that two ETFs are one bet."""
+
+    def test_two_precious_metals_names_are_one_position(self):
+        # Neither GDX nor SLV carries a sector, so the sector cap never fired
+        # and they stacked into a single trade on the gold price.
+        findings = check_portfolio(
+            [{"symbol": "GDX", "capital": 9_500},
+             {"symbol": "SLV", "capital": 4_200}],
+            limits=RiskLimits(account_value=20_000),
+        )
+        self.assertIn("correlated_capital", codes(findings))
+
+    def test_the_count_limit_catches_a_third_name(self):
+        findings = check_portfolio(
+            [{"symbol": "GDX", "capital": 1_000},
+             {"symbol": "SLV", "capital": 1_000},
+             {"symbol": "NEM", "capital": 1_000}],
+            limits=RiskLimits(account_value=100_000),
+        )
+        self.assertIn("correlated_exposure", codes(findings))
+
+    def test_unrelated_names_pass(self):
+        findings = check_portfolio(
+            [{"symbol": "GDX", "capital": 1_000},
+             {"symbol": "CCL", "capital": 1_000},
+             {"symbol": "PFE", "capital": 1_000}],
+            limits=RiskLimits(account_value=100_000),
+        )
+        self.assertEqual(codes(findings) & {"correlated_exposure",
+                                            "correlated_capital"}, set())
+
+    def test_a_proposed_trade_counts_toward_the_group(self):
+        findings = check_portfolio(
+            [{"symbol": "GDX", "capital": 9_500}],
+            proposed={"symbol": "SLV", "capital": 4_200},
+            limits=RiskLimits(account_value=20_000),
+        )
+        self.assertIn("correlated_capital", codes(findings))
+
+    def test_unclassified_symbols_are_not_constrained(self):
+        findings = check_portfolio(
+            [{"symbol": "ZZZZ", "capital": 9_000},
+             {"symbol": "YYYY", "capital": 9_000}],
+            limits=RiskLimits(account_value=100_000),
+        )
+        self.assertEqual(codes(findings) & {"correlated_exposure",
+                                            "correlated_capital"}, set())
+
+    def test_a_ticker_can_belong_to_more_than_one_group(self):
+        from wheelkit.correlation import groups_for
+
+        self.assertIn("china", groups_for("NIO"))
+        self.assertIn("ev and clean energy", groups_for("NIO"))

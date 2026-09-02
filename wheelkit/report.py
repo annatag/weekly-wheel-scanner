@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import textwrap
 from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
@@ -161,8 +162,10 @@ def print_trade_card(candidate: Candidate, *, index: int | None = None) -> None:
     print(f"  EXIT       Buy to close at ${plan.buyback_price:.2f} "
           f"({plan.profit_target_pct:.0%} of max profit, "
           f"${plan.profit_at_target:,.0f} locked in)")
-    print(f"             Roll or close by {plan.roll_date:%b %d} "
+    print(f"             Roll or close by {plan.roll_date:%a %b %d} "
           f"({plan.roll_dte} DTE) rather than holding into expiry")
+    for i, line in enumerate(textwrap.wrap(plan.time_stop_note, 62)):
+        print(f"  {'CHECKPOINT' if i == 0 else '':<10} {line}")
     print(f"             {plan.stop_note}")
     print(f"  IF ASSIGNED {plan.assignment_note}")
 
