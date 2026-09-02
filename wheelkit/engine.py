@@ -33,6 +33,7 @@ class ScanContext:
     regime_note: str
     market_open: bool
     earnings_available: bool
+    earnings_source: str = "feed"
 
 
 def prepare_context(provider: Provider, earnings: EarningsCalendar) -> ScanContext:
@@ -60,6 +61,7 @@ def prepare_context(provider: Provider, earnings: EarningsCalendar) -> ScanConte
         regime_note=regime_note,
         market_open=market_open,
         earnings_available=earnings.available,
+        earnings_source=getattr(earnings, "source", "feed"),
     )
 
 

@@ -201,7 +201,11 @@ def print_context(context: ScanContext, cfg_note: str = "") -> None:
     print(f"Market session: {session}")
     print(f"Market regime:  {context.regime_score:.0f}/100 — {context.regime_note}")
     if not context.earnings_available:
-        print("⚠ Earnings calendar unavailable; only earnings.csv overrides applied.")
+        print("⚠ Earnings calendar unavailable; the earnings exclusion is OFF "
+              "for every name without an earnings.csv override.")
+    elif context.earnings_source.startswith("cache"):
+        print(f"Earnings dates: {context.earnings_source} — the feed did not "
+              "answer. Re-check any name reporting soon.")
     if cfg_note:
         print(cfg_note)
 

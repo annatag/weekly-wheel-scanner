@@ -1055,3 +1055,83 @@ class TestFillLog(unittest.TestCase):
         ]
         self.assertEqual(best_match(options, "GDX", "P", 92.5).strike, 92.0)
         self.assertIsNone(best_match(options, "FCX", "P", 71.0))
+
+
+class TestEarningsFallback(unittest.TestCase):
+    """An exclusion that quietly stops applying is worse than not having it."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.root = Path(self.dir.name)
+        self.overrides = self.root / "earnings.csv"
+        self.overrides.write_text("symbol,earnings_date\n", encoding="utf-8")
+        self.cache = self.root / ".earnings_cache.json"
+
+    def _write_cache(self, age_days: float, horizon: int = 45):
+        import json
+        import time
+
+        self.cache.write_text(json.dumps({
+            "fetched_at": time.time() - age_days * 86400,
+            "horizon_days": horizon,
+            "dates": {"AAPL": "2026-10-29", "MU": "2026-09-24"},
+        }), encoding="utf-8")
+
+    def test_offline_uses_the_cache_instead_of_excluding_nothing(self):
+        # This was the gap: offline skipped the fetch, and the cache was only
+        # reachable through the fetch, so the gate silently applied to nothing.
+        from wheelkit.earnings import EarningsCalendar
+
+        self._write_cache(age_days=6)
+        cal = EarningsCalendar.build(
+            self.overrides, horizon_days=41, offline=True, cache_path=self.cache
+        )
+        self.assertTrue(cal.available)
+        self.assertEqual(cal.next_date("MU"), date(2026, 9, 24))
+        self.assertIn("cache", cal.source)
+
+    def test_a_stale_cache_says_how_stale(self):
+        from wheelkit.earnings import EarningsCalendar
+
+        self._write_cache(age_days=9)
+        cal = EarningsCalendar.build(
+            self.overrides, horizon_days=41, offline=True, cache_path=self.cache
+        )
+        self.assertIn("9 days old", cal.source)
+
+    def test_no_cache_and_no_feed_reports_unavailable(self):
+        from wheelkit.earnings import EarningsCalendar
+
+        cal = EarningsCalendar.build(
+            self.overrides, horizon_days=41, offline=True, cache_path=self.cache
+        )
+        self.assertFalse(cal.available)
+        self.assertIsNone(cal.next_date("MU"))
+
+    def test_overrides_still_win_over_the_cache(self):
+        from wheelkit.earnings import EarningsCalendar
+
+        self._write_cache(age_days=1)
+        self.overrides.write_text(
+            "symbol,earnings_date\nMU,2026-09-30\n", encoding="utf-8"
+        )
+        cal = EarningsCalendar.build(
+            self.overrides, horizon_days=41, offline=True, cache_path=self.cache
+        )
+        self.assertEqual(cal.next_date("MU"), date(2026, 9, 30))
+
+    def test_a_cache_that_does_not_reach_far_enough_is_refused(self):
+        from wheelkit.earnings import EarningsCalendar
+
+        self._write_cache(age_days=1, horizon=10)
+        cal = EarningsCalendar.build(
+            self.overrides, horizon_days=41, offline=True, cache_path=self.cache
+        )
+        self.assertFalse(cal.available)
+
+    def test_a_corrupt_cache_is_ignored_rather_than_raising(self):
+        from wheelkit.earnings import read_cache
+
+        self.cache.write_text("{not json", encoding="utf-8")
+        self.assertIsNone(read_cache(self.cache))
