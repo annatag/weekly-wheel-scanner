@@ -69,6 +69,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-delta", type=float, default=0.10)
     p.add_argument("--max-delta", type=float, default=0.22)
     p.add_argument("--max-spread-pct", type=float, default=0.12)
+    p.add_argument("--min-credit-pct", type=float, default=0.003,
+                   help="Minimum credit as a share of the strike. Relative "
+                        "rather than a dollar floor, which would screen on "
+                        "share price instead of on premium.")
     p.add_argument("--min-vrp", type=float, default=1.0,
                    help="Minimum implied/realised volatility ratio")
     p.add_argument("--min-annualised", type=float, default=0.12)
@@ -176,6 +180,7 @@ def main() -> int:
         min_abs_delta=args.min_delta,
         max_abs_delta=args.max_delta,
         max_spread_pct=args.max_spread_pct,
+        min_credit_pct_of_strike=args.min_credit_pct,
         min_vrp=args.min_vrp,
         min_annualised_return=args.min_annualised,
         min_avg_dollar_volume=args.min_dollar_volume,

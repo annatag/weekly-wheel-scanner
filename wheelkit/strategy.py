@@ -67,7 +67,17 @@ class WheelConfig:
     max_spread_pct: float = 0.12
     min_option_volume: float = 5
     min_quote_size: float = 1
-    min_credit_per_share: float = 0.15
+    # The credit floor is relative, not absolute. A flat $0.15 is the one gate
+    # in here denominated in dollars rather than in percent, and it therefore
+    # screens on share price instead of on premium: at a 0.18 delta and 14
+    # days, a $100 stock clears $0.15 at 35% implied vol while an $8 stock
+    # needs well over 80% to reach the same number, for an identical
+    # return on capital. Credit as a share of the strike is scale-free - it is
+    # the same 0.7% for both - so it screens on what the trade actually pays.
+    min_credit_pct_of_strike: float = 0.003
+    # Kept only as a noise floor: under a nickel the premium is one or two
+    # ticks and the spread takes it back on the way out.
+    min_credit_per_share: float = 0.05
 
     # Underlying quality.
     # Consolidated (SIP) dollar volume. This was 20M when bars came from IEX,
@@ -362,7 +372,10 @@ def build_candidates(
             rejects["spread too wide"] += 1
             continue
         if quote.mid < cfg.min_credit_per_share:
-            rejects["credit below floor"] += 1
+            rejects["credit below the tick floor"] += 1
+            continue
+        if quote.strike > 0 and quote.mid / quote.strike < cfg.min_credit_pct_of_strike:
+            rejects["credit too thin for the capital"] += 1
             continue
         if quote.volume < cfg.min_option_volume:
             rejects["option volume too low"] += 1

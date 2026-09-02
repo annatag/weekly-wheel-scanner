@@ -40,7 +40,10 @@ class RiskLimits:
     min_dte: int = 5
     max_dte: int = 45
     min_vrp: float = 1.0
-    min_credit_per_share: float = 0.15
+    # Relative, for the same reason as the scanner's: an absolute floor
+    # screens on share price rather than on what the trade pays.
+    min_credit_pct_of_strike: float = 0.003
+    min_credit_per_share: float = 0.05
     max_spread_pct: float = 0.12
     require_otm: bool = True
     block_earnings_before_expiry: bool = True
@@ -172,9 +175,19 @@ def check_entry(
     if credit_per_share < limits.min_credit_per_share:
         out.append(Finding(
             WARN, "credit_too_small",
-            f"${credit_per_share:.2f} per share is below the "
-            f"${limits.min_credit_per_share:.2f} floor",
+            f"${credit_per_share:.2f} per share is a tick or two of premium, "
+            f"below the ${limits.min_credit_per_share:.2f} floor - the spread "
+            "takes it back on the way out",
         ))
+    elif strike > 0:
+        pct = credit_per_share / strike
+        if pct < limits.min_credit_pct_of_strike:
+            out.append(Finding(
+                WARN, "credit_too_thin",
+                f"${credit_per_share:.2f} on a ${strike:g} strike is {pct:.2%} "
+                f"of the capital at risk, below the "
+                f"{limits.min_credit_pct_of_strike:.2%} floor",
+            ))
 
     if spread_pct > limits.max_spread_pct:
         out.append(Finding(

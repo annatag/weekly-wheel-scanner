@@ -101,6 +101,7 @@ def main() -> int:
         min_option_volume=0,
         min_quote_size=0,
         min_credit_per_share=0.01,
+        min_credit_pct_of_strike=0.0,
         min_avg_dollar_volume=0,
         max_abs_move_5d=1.0,
         min_vrp=0.0,

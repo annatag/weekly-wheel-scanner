@@ -1135,3 +1135,41 @@ class TestEarningsFallback(unittest.TestCase):
 
         self.cache.write_text("{not json", encoding="utf-8")
         self.assertIsNone(read_cache(self.cache))
+
+
+class TestCreditFloorIsRelative(unittest.TestCase):
+    """A dollar floor screens on share price, not on what the trade pays."""
+
+    def _entry(self, strike, credit, **kw):
+        base = dict(
+            symbol="XYZ", right="P", strike=strike, spot=strike * 1.12,
+            delta=-0.18, dte=14, credit_per_share=credit, spread_pct=0.05,
+            vrp=1.3, setup="pullback", limits=LIMITS,
+        )
+        base.update(kw)
+        return check_entry(**base)
+
+    def test_the_same_return_passes_at_any_share_price(self):
+        # 0.73% of the strike either way: identical trades, and the old $0.15
+        # floor passed the expensive one and rejected the cheap one.
+        for strike, credit in ((7.54, 0.055), (28.29, 0.207), (94.28, 0.691)):
+            with self.subTest(strike=strike):
+                self.assertNotIn(
+                    "credit_too_thin", codes(self._entry(strike, credit))
+                )
+                self.assertNotIn(
+                    "credit_too_small", codes(self._entry(strike, credit))
+                )
+
+    def test_a_genuinely_thin_credit_is_still_refused(self):
+        # 0.1% of the strike: the premium does not pay for the capital.
+        self.assertIn("credit_too_thin", codes(self._entry(100.0, 0.10)))
+
+    def test_a_tick_of_premium_is_refused_at_any_ratio(self):
+        # 0.5% of a $6 strike, but three cents is one tick and the spread
+        # takes it back on the way out.
+        self.assertIn("credit_too_small", codes(self._entry(6.0, 0.03)))
+
+    def test_the_two_floors_do_not_both_fire(self):
+        findings = codes(self._entry(6.0, 0.03))
+        self.assertNotIn("credit_too_thin", findings)
