@@ -119,13 +119,23 @@ python weekly_wheel_scan.py --top 10                        # 1. what to sell
 python wheel_advise.py HOOD                                 # 2. strike and expiry
 python wheel_positions.py --check HOOD 84 P 2026-09-18 1.20 # 3. VALIDATE
 python wheel_trade_suggestions.py                           # 4. re-quote
-                                                            # 5. place it, record it
+                                                            # 5. place it
+python wheel_fills.py record HOOD P 2026-09-18 84 1 1.20    # 6. record the fill
 ```
 
 **Step 3 is the one that changes outcomes.** Steps 1 and 2 tell you what is
 worth selling; step 3 is the only one that stops you selling something else.
 Four of the five positions in the paper book skipped it, and the two furthest
 outside the delta band were the two largest losses.
+
+**Step 6 is the one that makes the rest reviewable.** A strike gets nudged for
+a better bid, an expiry slides a week to clear an earnings date, a limit gets
+walked past the floor to fill at all — all reasonable at the ticket, and each
+one breaks the link between what the scan recommended and what happened.
+`wheel_fills.py` records the fill against the suggestion it came from and
+computes the difference while the scan is still on disk, so the model is
+graded on its own recommendations rather than on trades that drifted from
+them.
 
 Run the scan while the market is open. Outside hours, spreads widen enough
 that "spread too wide" becomes the largest rejection bucket and the results
@@ -138,7 +148,8 @@ python build_universe.py
 ```
 
 Rebuild when the universe is a few weeks old, or whenever you change
-`--max-cash` — the price ceiling has to move with it.
+`--max-cash` — the price ceiling has to move with it, and the scan will refuse
+to run until it does.
 
 ### Ad hoc
 
@@ -213,6 +224,28 @@ the most contracts on the cheapest stock, which is usually the most volatile:
 a $28 name took five contracts and a 10% week cost five times what one would
 have.
 
+The caps are tied to the sleeve, and the sleeve is set by the most expensive
+stock the universe admits. At $220 × 100 = $22,000 on a $100,000 account:
+
+| | value | why |
+|---|---|---|
+| Cash per position | $22,000 | one contract on a $220 stock |
+| Capital per position | 22% | so the gate can size what the scanner suggests |
+| Two-sigma risk budget | 2% ($2,000) | usually the binding constraint, not the caps |
+| Max open positions | 3 | $22,000 each against a 60% total-capital cap |
+
+**Raising the price ceiling costs diversification, and the position count says
+so.** Two full-size positions fit inside the 60% total-capital cap; a third
+has to be a cheaper name. The count was 8 when the sleeve was $15,000 — left
+there, it would have described a spread the account can no longer hold. If the
+book is mostly expensive names, three positions *is* the portfolio, and the
+correlation cap matters more, not less.
+
+Raising the sleeve also enlarges positions in cheap names, not just expensive
+ones: a $100 stock that took one contract at a $15,000 sleeve takes two at
+$22,000. The two-sigma budget still binds — that is what stops it becoming
+five — but the whole book scales, which is the part that is easy to miss.
+
 **While open** — monitoring, silent unless something trips:
 
 ```bash
@@ -223,6 +256,56 @@ python wheel_positions.py --alerts-only   # for a scheduled job
 Alerts on: a position going in the money, delta past 0.50, 50% of max profit
 captured, the last three days before expiry at a live delta, and a daily move
 over 5% in the underlying.
+
+**The checkpoint is asymmetric.** At 21 DTE a position that has captured less
+than 35% of its credit is raised for a decision — close, roll out, or hold it
+on purpose. One already past that threshold is working and stays silent. This
+is deliberately not "close everything at 21 DTE": in the batch that prompted
+the rule, GDX at 29.8% and SLV would both have tripped it, while DRAM was
+already past 66% and went on to close at 90%. A flat rule would have
+interrupted the trade that needed no decision at all, which is how a rule
+stops being read.
+
+```bash
+python wheel_positions.py --time-stop-dte 21 --time-stop-capture 0.35
+```
+
+The checkpoint is **half the contract's life, capped at 21 DTE** — the same
+rule the trade card prints as its roll date, so the monitor and the plan never
+disagree. Half is what matters here: this scanner sells 7–21 day contracts, and
+a flat 21-DTE checkpoint on a 16-day trade has already passed on the day you
+open it. Working that out needs the original life, so add an optional
+`entry_date` column to `positions.csv`:
+
+```csv
+symbol,expiration,strike,right,quantity,entry_credit,sector,entry_date
+GDX,2026-09-18,89,P,-1,0.94,,2026-09-02
+```
+
+Without it the checkpoint falls back to the flat 21 DTE, which is early for a
+two-week trade.
+
+**Deadlines land on trading days.** "21 DTE" resolves backwards to the nearest
+prior session, never forwards. Subtracting calendar days puts the checkpoint
+on a weekend two weeks in seven and on a holiday a few times a year, and a
+deadline nobody can act on is met late by definition — always late, never
+early, because the drift only goes one way.
+
+**Correlated names count as one position.** The sector limit counts positions
+per sector string, which ETFs do not carry: GDX and SLV both arrived
+uncategorised and were treated as diversification while being a single bet on
+the gold price. Underlyings are also grouped explicitly — precious metals,
+semiconductors, energy, China, crypto proxies and so on — and the group is
+capped both by position count (2) and by share of the account (20%):
+
+```
+ ! $13,700 (68% of the account) is committed to precious metals across
+   GDX, SLV, above the 20% limit
+```
+
+The groups live in `wheelkit/correlation.py` and are meant to be extended.
+A ticker in no group is constrained by neither cap, which is the honest
+outcome — the table simply has nothing to say about it.
 
 Severity follows the **odds**, not the calendar. An in-the-money position is
 urgent once assignment odds pass 85% or expiry is within three days; anything
@@ -283,14 +366,16 @@ when the file is missing. Run this directly only to rebuild on demand or to
 change the screen.
 
 ```bash
-python build_universe.py                            # top 250 by liquidity
+python build_universe.py                            # top 400 by liquidity
 python build_universe.py --dry-run                  # preview without writing
-python build_universe.py --max-price 250 --max-symbols 400
+python build_universe.py --max-price 250 --max-symbols 500   # also set --max-cash 25000
 ```
 
 `--max-price` is your per-position cash ceiling divided by 100, since one
 contract secures 100 shares. Leave it aligned with the scanner's `--max-cash`
-or the scan will keep rejecting names the universe just admitted.
+— the scan refuses to run when they disagree badly enough that names can
+never be sized. The file records the screen it was built with, in its header,
+which is what that check reads.
 
 The universe lives in `universe/`, which is gitignored. It sits in its own
 directory rather than the repository root because a branch checkout that
@@ -317,6 +402,69 @@ python weekly_wheel_scan.py --require-uptrend       # only names above their 50-
 
 Results are written to `wheel_scan_results.csv`, including every sub-score so
 you can see *why* something ranked where it did.
+
+#### The screen, in numbers
+
+Every default in one table, because a filter you cannot see is one you cannot
+argue with. `--help` prints the same values; this is the version you can read
+without running anything.
+
+| Gate | Default | Flag |
+|---|---|---|
+| Share price | $5 – $220 | `build_universe.py --min-price / --max-price` |
+| Cash per position | $3,000 – $22,000 | `--min-cash` / `--max-cash` |
+| Days to expiry | 7 – 21 | `--min-dte` / `--max-dte` |
+| Delta band | 0.10 – 0.22 | `--min-delta` / `--max-delta` |
+| Bid/ask spread | ≤ 12% | `--max-spread-pct` |
+| Credit | ≥ 0.3% of the strike, and ≥ $0.05 | `--min-credit-pct` |
+| Implied ÷ realised vol | ≥ 1.0 | `--min-vrp` |
+| Annualised return | ≥ 12% | `--min-annualised` |
+| Dollar volume | ≥ $50M/day | `--min-dollar-volume` |
+| Universe size | top 400 by liquidity | `build_universe.py --max-symbols` |
+| Earnings before expiry | excluded | `--allow-earnings` |
+| Down on the quarter *and* the month | excluded | `--allow-falling-knife` |
+
+**`--max-price` × 100 = `--max-cash`.** One contract secures 100 shares, so
+$220 × 100 = $22,000. These are set by two different commands with two
+different defaults, so they drift — and when they do, the scan spends its
+whole run pricing contracts it silently drops at sizing, leaving no trace but
+an `outside cash sleeve` reject count nobody reads.
+
+The scanner now checks. A universe wider than the sleeve can reach is refused
+outright, with the exact fix:
+
+```
+REFUSING TO SCAN: the universe and the cash sleeve disagree.
+
+  The universe admits stocks up to $220, but a $15,000 sleeve secures
+  a strike of only $150. Reaching the top of the universe would need a
+  strike 31.8% out of the money, deeper than the delta band goes -
+  those names can never be sized and will be priced and then dropped
+  every run. Set --max-cash 22000 to match, or rebuild the universe
+  with --max-price 150.
+```
+
+A sleeve *larger* than the ceiling passes silently — that is merely
+conservative. A sleeve slightly too small warns instead of refusing, because
+part of the delta band is still reachable. `--allow-sleeve-mismatch` scans
+anyway. The check reads the screen out of the universe file's own header, so
+it compares what was actually built rather than what the flags say today.
+
+Note that the ceiling is a *spot* price while sizing uses the *strike*, and a
+put strike sits below spot. Across 7–21 DTE and 25–50% implied volatility the
+0.10–0.22 delta band lands 2.5%–13.4% out of the money, so a $220 stock
+actually needs somewhere between $19,000 and $21,500 — the $22,000 sleeve
+covers the whole band with room to spare.
+
+**The credit floor is a percentage, not a dollar amount.** It used to be a
+flat $0.15 per share, which is the only gate in the list denominated in
+dollars rather than in percent — so it screened on share price instead of on
+premium. At a 0.18 delta and 14 days, an identical trade paying 0.73% of the
+strike clears $0.15 comfortably on a $100 stock and fails it on anything under
+about $20, no matter how rich the volatility. Credit as a share of the strike
+is the same number at every price. The absolute floor survives at $0.05, where
+it does the one job it is good for: rejecting a premium so small the spread
+takes it back on the way out.
 
 ### `wheel_advise.py` — how to sell it
 
@@ -374,6 +522,49 @@ Re-quotes the saved scan against the current market and reprices the limits.
 Option quotes move far more than the underlying, so run this immediately before
 trading. Contracts that no longer pass the spread check are marked `WAIT`, and
 the original position size is preserved.
+
+### `wheel_fills.py` — what you actually sold
+
+Records entries and exits against the scan that suggested them, so the
+scanner can be graded on its own recommendations.
+
+```bash
+python wheel_fills.py record GDX P 2026-09-04 95 1 1.03   # symbol right expiry strike qty credit
+python wheel_fills.py close  GDX P 2026-09-04 95 --debit 0.31
+python wheel_fills.py close  FCX P 2026-09-11 68 --expired
+python wheel_fills.py list
+python wheel_fills.py report
+```
+
+`record` looks the contract up in `wheel_scan_results.csv`, copies the
+suggested strike, expiry, limit and score **into the row**, and states how the
+fill differed:
+
+```
+Recorded FCX $68P Sep 11 x2 at $0.61 ($122 credit)
+  Drifted from the 2026-08-24 scan: strike $68 vs $71 suggested;
+  expiry Sep 11 vs Sep 04 suggested (+7d)
+  Graded separately: the model did not recommend this contract.
+```
+
+The suggested numbers are copied rather than referenced because the next scan
+overwrites the results file, and a pointer into a deleted file is worse than
+no pointer. A fill within 2% on strike, 3 days on expiry and 15% on credit
+counts as the suggested trade; anything further out is logged and graded
+separately. `--no-scan` records a trade that had no scan behind it.
+
+`report` splits the P/L three ways — as suggested, drifted, and no scan — which
+is the only comparison that says anything about the model:
+
+```
+3 fill(s): 1 as suggested, 1 drifted, 1 with no scan attached.
+
+  as suggested    1 closed  $      +72  1/1 green  70% of credit kept on average
+  drifted         1 closed  $     +122  1/1 green  100% of credit kept on average
+```
+
+Fills live in `fills.csv`, which is gitignored along with the other position
+files.
 
 ## Reading a trade card
 
@@ -462,6 +653,98 @@ Black-Scholes rather than taken from a vendor, because the free tier does not
 supply them. The test suite verifies this against put-call parity, finite-
 difference deltas and one-day decay.
 
+## What changed after the first live batch, and why
+
+Five paper positions, reviewed after they closed. None of these are scoring
+changes; every one is a gap between what the tool said and what could be
+acted on.
+
+- **"Close at 21 DTE" was the wrong rule, so it became a checkpoint.** GDX sat
+  at 29.8% of its credit and SLV was in the same state, while DRAM was already
+  past 66% and closed at 90%. A flat rule flags all three; the two that needed
+  a decision were the two that had not paid their way. The check is now
+  asymmetric and silent above the threshold, because a rule that interrupts
+  working trades is a rule you stop reading.
+- **Deadlines landed on days the market is shut.** `expiry − 21 days` is a
+  Sunday two weeks in seven. Every deadline now resolves back to the previous
+  session — back, never forward, since forward is already later than the rule
+  asked for. NYSE holidays are generated from the rules rather than listed, so
+  they stay correct without maintenance.
+- **The sector cap could not see the biggest concentration in the book.** GDX
+  and SLV are ETFs, carry no sector string, and so counted as two unrelated
+  positions while being one bet on the gold price. Underlyings are now grouped
+  by correlation as well, and capped by count and by share of the account.
+- **The scan could not be graded.** Nothing recorded what was actually filled
+  against what was suggested, so a review compared the model to trades that
+  had drifted from it. `wheel_fills.py` closes that loop.
+- **The earnings exclusion was off again, in a new way.** The cache was
+  reachable only through the feed's freshness check, so `--offline-earnings`
+  and any failed fetch produced an empty calendar — and an empty calendar
+  excludes nothing. The cache is now read at any age, and the report says
+  which source it used and how old it is. (This was not what hit GDX and SLV:
+  neither is a company and neither reports. The correlation cap is the check
+  that catches those two.)
+- **Cheap stocks were still excluded, by a different gate.** The `$7,000` cash
+  floor was fixed in version 2; the flat `$0.15` credit floor was not. It is
+  the only screen denominated in dollars rather than percent, so it rejected
+  an $8 stock at any plausible volatility while passing a $100 stock paying
+  the identical 0.73% of strike. The floor is now relative, with `$0.05` kept
+  as a spread-noise guard.
+
+## Raising the price ceiling to $220
+
+Done deliberately, and it moves four numbers at once because they are one
+number wearing four hats:
+
+| | was | now |
+|---|---|---|
+| `build_universe.py --max-price` | $150 | $220 |
+| `--max-cash` | $15,000 | $22,000 |
+| `max_capital_per_position_pct` | 15% | 22% |
+| `max_open_positions` | 8 | 3 |
+| `--max-symbols` | 250 | 400 |
+
+Changing `--max-price` alone would have done nothing at all: `allow_single_
+oversize` is off, so every strike above $150 fell straight into the `outside
+cash sleeve` reject bucket. The scan would have fetched and priced those names
+every run and dropped all of them.
+
+Changing the sleeve without the per-position cap would have been worse than
+nothing — the scanner would recommend $22,000 positions and
+`wheel_positions.py --check` would refuse to size every one of them, the two
+halves of the tool disagreeing on every expensive name.
+
+What it costs: at $22,000 a position, a $100,000 account holds two full-size
+positions plus a smaller third. That is the trade — a wider universe bought
+with a narrower book. The 60% total-capital cap is unchanged and is the
+backstop; a third full-size position trips it, which is the intended answer.
+
+### `--max-symbols` had to move too
+
+`--max-symbols` is a **budget, not a screen**: names compete for the slots,
+ranked by dollar volume. So at 250 the wider price range did not widen the
+universe — it *swapped* it. The first rebuild at $220 added 81 names and
+evicted 81:
+
+```
+added    ACN BKNG CRWD HON RTX QCOM MS PLTR XOM TGT LOW ...
+dropped  JOBY SMR CLSK CLF QXO RGTI QBTS DKNG TOST PINS ...
+```
+
+Expensive mega-caps out-rank cheap names on dollar volume every time, so the
+cheap end of the book was paying for the expensive end — quietly undoing the
+work that made cheap names reachable in the first place. Over 400 names clear
+the $5–$220 price and volume screens, so 250 was the binding constraint, not
+the price range.
+
+**The default is now 400**, which admits the expensive end without evicting
+the cheap end. The cost is scan time, which scales with the symbol count.
+Lowering it again evicts the least liquid names first — which are the cheap
+ones.
+
+To go back, move all four together, or run
+`python build_universe.py --max-price 150` with `--max-cash 15000`.
+
 ## Limitations
 
 - **Open interest is unavailable** on the free Alpaca tier, so liquidity is
@@ -469,6 +752,15 @@ difference deltas and one-day decay.
   pass.
 - **Quotes outside market hours are the previous close.** Spreads look far
   wider than they trade, and the trade card labels this.
+- **A cached earnings calendar can be stale.** When the Nasdaq feed does not
+  answer, the last cached calendar is used at any age and the scan header says
+  how old it is. Dates are published weeks ahead and rarely move by more than a
+  day, but a report added since the cache was written is invisible.
+- **Correlation groups are declared, not measured.** `wheelkit/correlation.py`
+  is a hand-maintained table. It is deliberate — a rolling correlation matrix
+  moves most in the crisis where the grouping is supposed to bind — but it
+  means a pair that moves together and is not in the table will not be caught.
+  Add names to it as you meet them.
 - **The earnings calendar only covers scheduled reports.** A contract can carry
   a catalyst the calendar does not list — litigation, FDA, M&A. Implied
   volatility above 80% triggers a warning for exactly this reason; investigate
