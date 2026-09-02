@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import textwrap
 from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
@@ -161,8 +162,10 @@ def print_trade_card(candidate: Candidate, *, index: int | None = None) -> None:
     print(f"  EXIT       Buy to close at ${plan.buyback_price:.2f} "
           f"({plan.profit_target_pct:.0%} of max profit, "
           f"${plan.profit_at_target:,.0f} locked in)")
-    print(f"             Roll or close by {plan.roll_date:%b %d} "
+    print(f"             Roll or close by {plan.roll_date:%a %b %d} "
           f"({plan.roll_dte} DTE) rather than holding into expiry")
+    for i, line in enumerate(textwrap.wrap(plan.time_stop_note, 62)):
+        print(f"  {'CHECKPOINT' if i == 0 else '':<10} {line}")
     print(f"             {plan.stop_note}")
     print(f"  IF ASSIGNED {plan.assignment_note}")
 
@@ -198,7 +201,11 @@ def print_context(context: ScanContext, cfg_note: str = "") -> None:
     print(f"Market session: {session}")
     print(f"Market regime:  {context.regime_score:.0f}/100 — {context.regime_note}")
     if not context.earnings_available:
-        print("⚠ Earnings calendar unavailable; only earnings.csv overrides applied.")
+        print("⚠ Earnings calendar unavailable; the earnings exclusion is OFF "
+              "for every name without an earnings.csv override.")
+    elif context.earnings_source.startswith("cache"):
+        print(f"Earnings dates: {context.earnings_source} — the feed did not "
+              "answer. Re-check any name reporting soon.")
     if cfg_note:
         print(cfg_note)
 

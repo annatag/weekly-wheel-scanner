@@ -54,6 +54,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=7497)
     p.add_argument("--account-value", type=float, default=100_000.0)
+    p.add_argument("--time-stop-dte", type=int, default=21,
+                   help="Checkpoint at which a position has to justify itself. "
+                        "Resolved back to the nearest trading day.")
+    p.add_argument("--time-stop-capture", type=float, default=0.35,
+                   help="Share of the credit a position must have captured by "
+                        "the checkpoint. Below it you get a decision to make; "
+                        "above it the trade is working and stays quiet.")
     p.add_argument("--alerts-only", action="store_true",
                    help="Print nothing unless a position trips a threshold")
     p.add_argument("--no-banner", action="store_true",
@@ -256,7 +263,11 @@ def run_check(args: argparse.Namespace, provider: AlpacaProvider,
 
 def main() -> int:
     args = parse_args()
-    limits = RiskLimits(account_value=args.account_value)
+    limits = RiskLimits(
+        account_value=args.account_value,
+        time_stop_dte=args.time_stop_dte,
+        time_stop_min_capture=args.time_stop_capture,
+    )
 
     if args.notify_test:
         return run_notify_test(args)
@@ -303,7 +314,8 @@ def main() -> int:
             spot=position.spot, expiration=position.expiration, dte=position.dte,
             delta=position.delta, entry_credit=position.entry_credit,
             current_mid=position.mid,
-            underlying_move_1d=position.underlying_move_1d, limits=limits,
+            underlying_move_1d=position.underlying_move_1d,
+            entry_date=position.entry_date, limits=limits,
         )
 
     portfolio = check_portfolio(

@@ -7,10 +7,11 @@ broker ticket, plus the exit rules that decide how long the position is held.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 
 from .strategy import Candidate
+from .tradingdays import deadline_for_dte
 
 # US option quoting increments: a penny below $3.00, a nickel at or above it.
 # Rounding to the wrong increment produces a limit the exchange will reject.
@@ -81,13 +82,19 @@ class ManagementPlan:
     profit_at_target: float
     roll_date: date
     roll_dte: int
+    time_stop_min_capture: float
+    time_stop_buyback: float
     assignment_cost: float
     assignment_note: str
     stop_note: str
+    time_stop_note: str
 
 
 def build_management_plan(
-    candidate: Candidate, *, profit_target_pct: float = 0.50
+    candidate: Candidate,
+    *,
+    profit_target_pct: float = 0.50,
+    time_stop_min_capture: float = 0.35,
 ) -> ManagementPlan:
     """Standard wheel management, sized to this specific contract.
 
@@ -99,9 +106,21 @@ def build_management_plan(
     multiplier = 100.0 * candidate.contracts
     profit = (candidate.mid - buyback) * multiplier
 
-    # Roll or close at 21 DTE, where gamma begins to dominate theta.
+    # Roll or close at 21 DTE, where gamma begins to dominate theta. The date
+    # is resolved back to a real session: a deadline that falls on a Sunday
+    # gets acted on Monday at the earliest, which is already late.
     roll_dte = min(21, max(3, candidate.dte // 2))
-    roll_date = candidate.expiration - timedelta(days=roll_dte)
+    roll_date = deadline_for_dte(candidate.expiration, roll_dte)
+
+    # The checkpoint is a decision point, not an exit. Only a position short
+    # of this much of its credit needs one; anything past it is working.
+    time_stop_buyback = round_to_tick(candidate.mid * (1 - time_stop_min_capture))
+    time_stop_note = (
+        f"On {roll_date:%a %b %d} ({roll_dte} DTE): if the contract still costs "
+        f"more than ${time_stop_buyback:.2f} to buy back you are under "
+        f"{time_stop_min_capture:.0%} of the credit - close it, roll out, or "
+        f"choose to hold it on purpose. Above that it is working; leave it."
+    )
 
     if candidate.right == "P":
         cost = candidate.strike * multiplier
@@ -132,7 +151,10 @@ def build_management_plan(
         profit_at_target=profit,
         roll_date=roll_date,
         roll_dte=roll_dte,
+        time_stop_min_capture=time_stop_min_capture,
+        time_stop_buyback=time_stop_buyback,
         assignment_cost=cost,
         assignment_note=note,
         stop_note=stop,
+        time_stop_note=time_stop_note,
     )

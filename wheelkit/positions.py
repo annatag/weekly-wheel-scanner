@@ -42,6 +42,10 @@ class OpenOption:
     entry_credit: float  # per share, positive for a credit received
     source: str = "csv"
     sector: str | None = None
+    # Optional. With it the checkpoint is half the contract's life, matching
+    # the plan the trade card printed; without it the checkpoint falls back to
+    # a fixed DTE, which is early for a two-week trade.
+    entry_date: date | None = None
 
     # Filled in by enrich().
     spot: float = float("nan")
@@ -76,7 +80,7 @@ class OpenOption:
 
 
 def read_positions_csv(path: Path) -> list[OpenOption]:
-    """Columns: symbol,expiration,strike,right,quantity,entry_credit[,sector]."""
+    """symbol,expiration,strike,right,quantity,entry_credit[,sector,entry_date]."""
     if not path.exists():
         return []
     out: list[OpenOption] = []
@@ -102,6 +106,12 @@ def read_positions_csv(path: Path) -> list[OpenOption]:
                 except (KeyError, ValueError):
                     continue
                 right = (row.get("right") or "P").strip().upper()[:1]
+                try:
+                    entry_date = datetime.fromisoformat(
+                        (row.get("entry_date") or "").strip()
+                    ).date()
+                except ValueError:
+                    entry_date = None
                 out.append(
                     OpenOption(
                         symbol=symbol,
@@ -113,6 +123,7 @@ def read_positions_csv(path: Path) -> list[OpenOption]:
                         entry_credit=abs(entry),
                         source="csv",
                         sector=(row.get("sector") or "").strip() or None,
+                        entry_date=entry_date,
                     )
                 )
     return out

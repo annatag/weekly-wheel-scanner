@@ -22,6 +22,9 @@ import math
 from dataclasses import dataclass, field
 from datetime import date
 
+from .correlation import group_for, groups_for
+from .tradingdays import deadline_for_dte
+
 # Severity ordering used for sorting and exit codes.
 INFO, WARN, URGENT = "INFO", "WARN", "URGENT"
 _SEVERITY = {INFO: 0, WARN: 1, URGENT: 2}
@@ -37,7 +40,10 @@ class RiskLimits:
     min_dte: int = 5
     max_dte: int = 45
     min_vrp: float = 1.0
-    min_credit_per_share: float = 0.15
+    # Relative, for the same reason as the scanner's: an absolute floor
+    # screens on share price rather than on what the trade pays.
+    min_credit_pct_of_strike: float = 0.003
+    min_credit_per_share: float = 0.05
     max_spread_pct: float = 0.12
     require_otm: bool = True
     block_earnings_before_expiry: bool = True
@@ -48,13 +54,26 @@ class RiskLimits:
     # Most that one adverse two-sigma move may cost, as a share of account.
     risk_budget_pct: float = 0.02
     max_contracts_per_position: int = 10
-    max_capital_per_position_pct: float = 0.15
+    # One position may secure the sleeve, and the sleeve is set by the most
+    # expensive stock the universe admits: $220 x 100 = $22,000, which is 22%
+    # of a $100,000 account. Raising the price ceiling and leaving this at 15%
+    # would have the scanner recommend trades the gate then refuses to size.
+    max_capital_per_position_pct: float = 0.22
 
     # --- portfolio ----------------------------------------------------
-    max_open_positions: int = 8
+    # A $22,000 sleeve and a 60% total-capital cap fit two full-size positions
+    # and a third smaller one. Eight was arithmetic left over from a $15,000
+    # sleeve; leaving it there would have described a diversification the
+    # account can no longer hold.
+    max_open_positions: int = 3
     max_total_capital_pct: float = 0.60
     max_positions_per_symbol: int = 1
     max_positions_per_sector: int = 3
+    # Correlation groups catch what the sector string cannot: ETFs carry no
+    # sector, so GDX and SLV counted as two unrelated names while being one
+    # bet on the gold price.
+    max_positions_per_group: int = 2
+    max_group_capital_pct: float = 0.20
 
     # --- while open ---------------------------------------------------
     alert_delta: float = 0.50
@@ -67,6 +86,12 @@ class RiskLimits:
     gamma_window_dte: int = 3
     underlying_move_alert: float = 0.05
     roll_dte: int = 21
+    # Asymmetric time stop. At the checkpoint a trade that has not paid its
+    # way yet is the one to decide about; one already past the threshold is
+    # working and gets left alone. "Close everything at N DTE" would have
+    # closed a position sitting on 66% of max profit for no reason.
+    time_stop_dte: int = 21
+    time_stop_min_capture: float = 0.35
 
 
 @dataclass
@@ -158,9 +183,19 @@ def check_entry(
     if credit_per_share < limits.min_credit_per_share:
         out.append(Finding(
             WARN, "credit_too_small",
-            f"${credit_per_share:.2f} per share is below the "
-            f"${limits.min_credit_per_share:.2f} floor",
+            f"${credit_per_share:.2f} per share is a tick or two of premium, "
+            f"below the ${limits.min_credit_per_share:.2f} floor - the spread "
+            "takes it back on the way out",
         ))
+    elif strike > 0:
+        pct = credit_per_share / strike
+        if pct < limits.min_credit_pct_of_strike:
+            out.append(Finding(
+                WARN, "credit_too_thin",
+                f"${credit_per_share:.2f} on a ${strike:g} strike is {pct:.2%} "
+                f"of the capital at risk, below the "
+                f"{limits.min_credit_pct_of_strike:.2%} floor",
+            ))
 
     if spread_pct > limits.max_spread_pct:
         out.append(Finding(
@@ -331,7 +366,50 @@ def check_portfolio(
                 f"({', '.join(sorted(symbols))}) - these move together",
             ))
 
+    out.extend(_correlation_findings(book, limits))
     return _sort(out)
+
+
+def _correlation_findings(book: list[dict], limits: RiskLimits) -> list[Finding]:
+    """Exposure aggregated by correlation group rather than by sector label.
+
+    Counted separately from the sector check because the two catch different
+    things and a name can trip both: the sector string is what the data feed
+    says the company does, and the group is what the position actually bets
+    on. An unclassified ticker is constrained by neither, which is the honest
+    outcome - the table simply has nothing to say about it.
+    """
+    out: list[Finding] = []
+    counts: dict[str, list[str]] = {}
+    capital: dict[str, float] = {}
+    for position in book:
+        symbol = str(position.get("symbol", "")).upper()
+        for group in groups_for(symbol):
+            counts.setdefault(group, []).append(symbol)
+            capital[group] = capital.get(group, 0.0) + float(
+                position.get("capital", 0.0) or 0.0
+            )
+
+    for group in sorted(counts):
+        symbols = counts[group]
+        if len(symbols) > limits.max_positions_per_group:
+            out.append(Finding(
+                WARN, "correlated_exposure",
+                f"{len(symbols)} positions in {group} "
+                f"({', '.join(sorted(set(symbols)))}) - one bet, "
+                f"{len(symbols)} tickers; the limit is "
+                f"{limits.max_positions_per_group}",
+            ))
+        committed = capital.get(group, 0.0)
+        pct = committed / limits.account_value if limits.account_value else 0.0
+        if pct > limits.max_group_capital_pct and len(symbols) > 1:
+            out.append(Finding(
+                WARN, "correlated_capital",
+                f"${committed:,.0f} ({pct:.0%} of the account) is committed to "
+                f"{group} across {', '.join(sorted(set(symbols)))}, above the "
+                f"{limits.max_group_capital_pct:.0%} limit",
+            ))
+    return out
 
 
 # ---------------------------------------------------------------------
@@ -351,6 +429,7 @@ def check_position(
     entry_credit: float,
     current_mid: float,
     underlying_move_1d: float = float("nan"),
+    entry_date: date | None = None,
     limits: RiskLimits | None = None,
 ) -> list[Finding]:
     """Alerts for a position that is already open.
@@ -401,6 +480,7 @@ def check_position(
             f"- ~{abs_delta:.0%} chance of assignment, {dte} DTE",
         ))
 
+    captured = float("nan")
     if entry_credit > 0 and current_mid >= 0:
         captured = (entry_credit - current_mid) / entry_credit
         if captured >= limits.profit_target_pct:
@@ -409,6 +489,12 @@ def check_position(
                 f"{captured:.0%} of max profit captured - closing costs "
                 f"${current_mid:.2f} and frees the capital",
             ))
+
+    out.extend(_time_stop(
+        symbol=symbol, right=right, strike=strike, expiration=expiration,
+        dte=dte, captured=captured, current_mid=current_mid,
+        entry_date=entry_date, limits=limits,
+    ))
 
     if dte <= limits.gamma_window_dte and not itm and abs_delta == abs_delta:
         if abs_delta > 0.15:
@@ -428,3 +514,83 @@ def check_position(
         ))
 
     return _sort(out)
+
+
+def checkpoint_dte_for(
+    expiration: date, entry_date: date | None, limits: RiskLimits
+) -> int:
+    """How many days before expiry the position has to justify itself.
+
+    Half the contract's life, capped at ``time_stop_dte``. The cap is what
+    matters on a 45-day trade; the half is what matters on the 7-21 day
+    contracts this scanner actually sells, where a flat 21-DTE checkpoint is
+    already in the past on the day you open. This is the same rule the trade
+    card prints as the roll date, so the monitor and the plan agree.
+
+    Without an entry date the original life is unknown and the flat cap is all
+    there is. Add an ``entry_date`` column to positions.csv to get the better
+    answer.
+    """
+    if entry_date is None:
+        return limits.time_stop_dte
+    original_dte = max((expiration - entry_date).days, 0)
+    return min(limits.time_stop_dte, max(limits.gamma_window_dte + 1,
+                                         original_dte // 2))
+
+
+def _time_stop(
+    *,
+    symbol: str,
+    right: str,
+    strike: float,
+    expiration: date,
+    dte: int,
+    captured: float,
+    current_mid: float,
+    limits: RiskLimits,
+    entry_date: date | None = None,
+    today: date | None = None,
+) -> list[Finding]:
+    """Flag a position that has not paid its way by the checkpoint.
+
+    Deliberately asymmetric. A flat "close everything at N DTE" rule treats
+    the trade earning 66% of its credit the same as the one earning 12%, and
+    the first of those needs no decision from anyone. Only the laggards are
+    raised, so the alert stays worth reading: the position has had most of its
+    life to work, the remaining credit is small, and from here gamma grows
+    faster than theta pays.
+
+    The deadline is a real session. ``expiration - N days`` lands on a weekend
+    two weeks in seven, and a deadline nobody can act on is met late by
+    definition.
+    """
+    if limits.time_stop_dte <= 0 or dte < 0:
+        return []
+    today = today or date.today()
+    checkpoint_dte = checkpoint_dte_for(expiration, entry_date, limits)
+    deadline = deadline_for_dte(expiration, checkpoint_dte)
+    if today < deadline:
+        return []
+    # Inside the gamma window the in-the-money and gamma checks already speak,
+    # and by then the decision is not "is this working" but "am I assigned".
+    if dte <= limits.gamma_window_dte:
+        return []
+    if captured != captured:
+        return [Finding(
+            INFO, "time_stop_unknown",
+            f"{symbol} ${strike:g}{right} is past its {checkpoint_dte}-DTE "
+            f"checkpoint ({deadline:%b %d}) and there is no entry credit on "
+            "file to judge it against",
+        )]
+    if captured >= limits.time_stop_min_capture:
+        return []
+
+    shortfall = limits.time_stop_min_capture - captured
+    return [Finding(
+        WARN, "time_stop",
+        f"{symbol} ${strike:g}{right} has captured {captured:.0%} of its credit "
+        f"by the {checkpoint_dte}-DTE checkpoint ({deadline:%b %d}), "
+        f"{shortfall:.0%} short of the {limits.time_stop_min_capture:.0%} floor "
+        f"- close, roll out, or decide to hold it deliberately "
+        f"(buyback ${current_mid:.2f}, {dte} DTE left)",
+    )]

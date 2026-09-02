@@ -57,8 +57,10 @@ class UniverseFilters:
 
     min_price: float = 5.0
     # A single contract secures 100 shares, so the sleeve ceiling divided by
-    # 100 is the highest strike that fits one contract.
-    max_price: float = 150.0
+    # 100 is the highest strike that fits one contract. Keep this equal to
+    # the scanner's --max-cash / 100; weekly_wheel_scan.py refuses to run on a
+    # universe that admits stocks its sleeve could never secure.
+    max_price: float = 220.0
     min_dollar_volume: float = 50_000_000
     min_history_days: int = 60
     # You cannot sell meaningful premium on something that does not move.
@@ -66,7 +68,13 @@ class UniverseFilters:
     # realising well under 2% annualised, so screen on movement directly
     # rather than trying to name every such fund.
     min_realised_vol: float = 0.15
-    max_symbols: int = 250
+    # Ranked by liquidity, so this is a budget rather than a screen: names
+    # compete for the slots. At 250 a wider price range did not widen the
+    # universe, it swapped 81 cheap names for 81 expensive ones, because
+    # mega-caps out-rank small names on dollar volume every time. Over 400
+    # names clear the price and volume screens, so 400 admits the expensive
+    # end without evicting the cheap end.
+    max_symbols: int = 400
     exclude_leveraged: bool = True
     exclude_structured: bool = True
     allow_etfs: bool = True
@@ -303,11 +311,96 @@ def write_symbols_file(path: Path, report: ScreenReport,
         f"# Filters: price ${filters.min_price:g}-${filters.max_price:g}, "
         f"min ${filters.min_dollar_volume / 1e6:g}M/day consolidated volume, "
         f"top {filters.max_symbols} by liquidity.",
+        # The same numbers again, in a form the scanner can read back. The
+        # prose line above is for you; this one is so the scan can refuse to
+        # run against a universe its cash sleeve could never buy.
+        f"# filters: min_price={filters.min_price:g} "
+        f"max_price={filters.max_price:g} "
+        f"min_dollar_volume={filters.min_dollar_volume:g} "
+        f"max_symbols={filters.max_symbols:g}",
         f"# {len(report.kept)} symbols. Remove any you would not want to own.",
         "",
     ]
     lines.extend(entry.symbol for entry in report.kept)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+# A put strike sits below spot, so a stock priced at the ceiling still fits a
+# slightly smaller sleeve. How much smaller depends on how far out of the money
+# the delta band puts the strike: across 7-21 DTE and 25-50% implied vol, the
+# 0.10-0.22 band lands 2.5%-13.4% out of the money. So a sleeve within 10% of
+# the ceiling can still reach part of the band, and below that nothing fits.
+FULL_COVERAGE_RATIO = 1.00
+PARTIAL_COVERAGE_RATIO = 0.90
+
+
+def read_filters_file(path: Path) -> dict[str, float]:
+    """The screen a universe file was built with, read back from its header.
+
+    Files written before the machine-readable line existed are parsed from the
+    prose header instead, so an existing universe does not have to be rebuilt
+    just to be checked.
+    """
+    if not path.exists():
+        return {}
+    out: dict[str, float] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("#"):
+            break
+        body = stripped.lstrip("#").strip()
+        if body.startswith("filters:"):
+            for token in body[len("filters:"):].split():
+                key, _, value = token.partition("=")
+                try:
+                    out[key] = float(value)
+                except ValueError:
+                    continue
+            return out
+        matched = re.search(r"price \$([\d.]+)-\$([\d.]+)", body)
+        if matched:
+            out["min_price"] = float(matched.group(1))
+            out["max_price"] = float(matched.group(2))
+    return out
+
+
+def sleeve_mismatch(max_price: float, max_cash: float) -> tuple[str, str] | None:
+    """Whether a cash sleeve can actually buy what the universe admits.
+
+    Returns ``(severity, message)`` or None when the two agree. This is the
+    check that was missing: the universe and the sleeve are set by separate
+    commands with separate defaults, and when they drift the scan spends its
+    time pricing contracts it will silently reject at sizing.
+    """
+    if max_price <= 0 or max_cash <= 0:
+        return None
+    needed = max_price * 100.0
+    if max_cash >= needed * FULL_COVERAGE_RATIO:
+        return None
+
+    reachable_strike = max_cash / 100.0
+    required_otm = 1.0 - reachable_strike / max_price
+    # No thousands separators: these are meant to be pasted as arguments.
+    fix = (
+        f"Set --max-cash {needed:.0f} to match, or rebuild the universe with "
+        f"--max-price {reachable_strike:g}."
+    )
+    if max_cash < needed * PARTIAL_COVERAGE_RATIO:
+        return ("error", (
+            f"The universe admits stocks up to ${max_price:g}, but a "
+            f"${max_cash:,.0f} sleeve secures a strike of only "
+            f"${reachable_strike:g}. Reaching the top of the universe would "
+            f"need a strike {required_otm:.1%} out of the money, deeper than "
+            f"the delta band goes - those names can never be sized and will "
+            f"be priced and then dropped every run. " + fix
+        ))
+    return ("warning", (
+        f"The universe admits stocks up to ${max_price:g}, but a "
+        f"${max_cash:,.0f} sleeve secures a strike of only "
+        f"${reachable_strike:g}. Names near the ceiling are reachable only at "
+        f"strikes over {required_otm:.1%} out of the money, so the nearer half "
+        f"of the delta band is unavailable on them. " + fix
+    ))
 
 
 def read_symbols_file(path: Path) -> list[str]:

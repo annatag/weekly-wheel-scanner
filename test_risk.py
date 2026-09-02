@@ -141,10 +141,14 @@ class TestPortfolio(unittest.TestCase):
 
 class TestOpenPositionAlerts(unittest.TestCase):
     def _pos(self, **kw):
+        # Expiry is derived from the DTE the test asks for, so a case that
+        # overrides one is not silently contradicting the other. The time
+        # stop reads the expiry date and the gamma checks read the DTE.
+        dte = kw.pop("dte", 28)
         base = dict(
             symbol="XYZ", right="P", strike=90.0, spot=100.0,
-            expiration=SOON, dte=14, delta=-0.20, entry_credit=1.00,
-            current_mid=0.90, limits=LIMITS,
+            expiration=date.today() + timedelta(days=dte), dte=dte,
+            delta=-0.20, entry_credit=1.00, current_mid=0.90, limits=LIMITS,
         )
         base.update(kw)
         return check_position(**base)
@@ -727,3 +731,534 @@ class TestReturnMetrics(unittest.TestCase):
 
         self.assertTrue(math.isnan(roc_per_delta(self._c(0.01, 0.0))))
         self.assertTrue(math.isnan(roc_per_day(self._c(0.01, 0.2, dte=0))))
+
+
+class TestTradingCalendar(unittest.TestCase):
+    """Deadlines have to land on days the market is actually open."""
+
+    def test_weekend_deadline_resolves_backwards(self):
+        # A checkpoint that lands on a weekend goes back to the Friday, not
+        # forward to the Monday: forward is already later than the rule asked.
+        from wheelkit.tradingdays import deadline_for_dte
+
+        # 21 days before Sun 11 Oct 2026 is Sun 20 Sep -> Fri 18 Sep.
+        self.assertEqual(deadline_for_dte(date(2026, 10, 11), 21), date(2026, 9, 18))
+        self.assertEqual(deadline_for_dte(date(2026, 9, 20), 0), date(2026, 9, 18))
+
+    def test_holiday_deadline_resolves_backwards(self):
+        from wheelkit.tradingdays import deadline_for_dte
+
+        # Thanksgiving 2026 is Thu 26 Nov; the session before is Wed 25 Nov.
+        self.assertEqual(deadline_for_dte(date(2026, 11, 26), 0), date(2026, 11, 25))
+
+    def test_deadline_is_never_later_than_the_rule_asks(self):
+        from wheelkit.tradingdays import deadline_for_dte
+
+        for offset in range(0, 120):
+            expiry = date(2026, 9, 1) + timedelta(days=offset)
+            deadline = deadline_for_dte(expiry, 21)
+            self.assertLessEqual(deadline, expiry - timedelta(days=21))
+
+    def test_holidays_follow_the_nyse_rules(self):
+        from wheelkit.tradingdays import is_trading_day, market_holidays
+
+        self.assertIn(date(2026, 4, 3), market_holidays(2026))    # Good Friday
+        self.assertIn(date(2026, 7, 3), market_holidays(2026))    # Jul 4 is a Sat
+        self.assertIn(date(2026, 11, 26), market_holidays(2026))  # Thanksgiving
+        self.assertFalse(is_trading_day(date(2026, 9, 7)))        # Labor Day
+        self.assertTrue(is_trading_day(date(2026, 9, 8)))
+
+    def test_new_year_on_a_saturday_does_not_close_the_friday(self):
+        # 1 Jan 2028 is a Saturday. The exchange stays open 31 Dec 2027 rather
+        # than shutting the last session of the year.
+        from wheelkit.tradingdays import is_trading_day
+
+        self.assertTrue(is_trading_day(date(2027, 12, 31)))
+
+
+class TestTimeStop(unittest.TestCase):
+    """Only the trades that have not paid their way get raised."""
+
+    def _at_checkpoint(self, captured, dte=14, **kw):
+        credit = 1.00
+        base = dict(
+            symbol="GDX", right="P", strike=90.0, spot=100.0,
+            expiration=date.today() + timedelta(days=dte), dte=dte,
+            delta=-0.18, entry_credit=credit,
+            current_mid=credit * (1 - captured), limits=LIMITS,
+        )
+        base.update(kw)
+        return check_position(**base)
+
+    def test_a_laggard_at_the_checkpoint_is_flagged(self):
+        # GDX sat at 29.8% of its credit at the checkpoint and kept sitting.
+        self.assertIn("time_stop", codes(self._at_checkpoint(0.298)))
+
+    def test_a_winner_at_the_checkpoint_is_left_alone(self):
+        # DRAM was already past 66% and closed at 90%. A flat "close at 21 DTE"
+        # rule would have interrupted a trade that needed no decision.
+        self.assertNotIn("time_stop", codes(self._at_checkpoint(0.66)))
+
+    def test_silent_before_the_checkpoint(self):
+        self.assertNotIn("time_stop", codes(self._at_checkpoint(0.05, dte=40)))
+
+    def test_the_message_names_the_shortfall_and_the_deadline(self):
+        finding = next(
+            f for f in self._at_checkpoint(0.10) if f.code == "time_stop"
+        )
+        self.assertIn("10%", finding.message)
+        self.assertIn("checkpoint", finding.message)
+
+    def test_every_checkpoint_it_can_quote_is_a_trading_day(self):
+        from wheelkit.tradingdays import deadline_for_dte, is_trading_day
+
+        for offset in range(0, 400):
+            expiry = date(2026, 1, 1) + timedelta(days=offset)
+            self.assertTrue(is_trading_day(deadline_for_dte(expiry, 21)))
+
+    def test_the_gamma_window_speaks_instead(self):
+        # Inside three days the question is assignment, not whether it worked.
+        self.assertNotIn("time_stop", codes(self._at_checkpoint(0.05, dte=2)))
+
+    def test_missing_entry_credit_says_so_rather_than_guessing(self):
+        findings = self._at_checkpoint(0.10, entry_credit=0.0)
+        self.assertIn("time_stop_unknown", codes(findings))
+
+    def test_the_threshold_is_configurable(self):
+        loose = RiskLimits(account_value=100_000, time_stop_min_capture=0.20)
+        self.assertNotIn(
+            "time_stop", codes(self._at_checkpoint(0.25, limits=loose))
+        )
+
+
+class TestCheckpointLength(unittest.TestCase):
+    """A 21-DTE checkpoint is already in the past on a two-week trade."""
+
+    def _pos(self, entry_date, dte, captured=0.10):
+        return check_position(
+            symbol="GDX", right="P", strike=90.0, spot=100.0,
+            expiration=date.today() + timedelta(days=dte), dte=dte,
+            delta=-0.18, entry_credit=1.00, current_mid=1.00 * (1 - captured),
+            entry_date=entry_date, limits=LIMITS,
+        )
+
+    def test_a_fresh_short_dated_trade_is_not_immediately_flagged(self):
+        # Opened at 16 DTE and one day old. Its checkpoint is 8 DTE, not 21,
+        # so it has a week to work before anyone asks about it.
+        self.assertNotIn(
+            "time_stop",
+            codes(self._pos(entry_date=date.today() - timedelta(days=1), dte=15)),
+        )
+
+    def test_the_same_trade_is_flagged_once_it_reaches_the_checkpoint(self):
+        self.assertIn(
+            "time_stop",
+            codes(self._pos(entry_date=date.today() - timedelta(days=10), dte=6)),
+        )
+
+    def test_the_cap_still_binds_on_a_long_dated_trade(self):
+        from wheelkit.risk import checkpoint_dte_for
+
+        opened = date.today() - timedelta(days=5)
+        expiry = date.today() + timedelta(days=55)
+        self.assertEqual(checkpoint_dte_for(expiry, opened, LIMITS), 21)
+
+    def test_the_checkpoint_matches_the_trade_card_rule(self):
+        # orders.build_management_plan uses min(21, max(3, dte // 2)); the
+        # monitor must not disagree with the plan the card printed.
+        from wheelkit.risk import checkpoint_dte_for
+
+        for original in (7, 10, 16, 21, 30, 45):
+            expiry = date.today() + timedelta(days=original)
+            expected = min(21, max(LIMITS.gamma_window_dte + 1, original // 2))
+            self.assertEqual(
+                checkpoint_dte_for(expiry, date.today(), LIMITS), expected
+            )
+
+    def test_without_an_entry_date_it_falls_back_to_the_flat_cap(self):
+        from wheelkit.risk import checkpoint_dte_for
+
+        expiry = date.today() + timedelta(days=16)
+        self.assertEqual(checkpoint_dte_for(expiry, None, LIMITS), 21)
+
+    def test_the_entry_date_column_is_optional(self):
+        path = Path(tempfile.mkdtemp()) / "positions.csv"
+        path.write_text(
+            "symbol,expiration,strike,right,quantity,entry_credit\n"
+            "CCL,2026-09-18,28,P,-5,0.656\n",
+            encoding="utf-8",
+        )
+        self.assertIsNone(read_positions_csv(path)[0].entry_date)
+
+    def test_the_entry_date_column_is_read_when_present(self):
+        path = Path(tempfile.mkdtemp()) / "positions.csv"
+        path.write_text(
+            "symbol,expiration,strike,right,quantity,entry_credit,entry_date\n"
+            "CCL,2026-09-18,28,P,-5,0.656,2026-09-02\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(read_positions_csv(path)[0].entry_date, date(2026, 9, 2))
+
+
+class TestCorrelatedExposure(unittest.TestCase):
+    """Sector labels cannot see that two ETFs are one bet."""
+
+    def test_two_precious_metals_names_are_one_position(self):
+        # Neither GDX nor SLV carries a sector, so the sector cap never fired
+        # and they stacked into a single trade on the gold price.
+        findings = check_portfolio(
+            [{"symbol": "GDX", "capital": 9_500},
+             {"symbol": "SLV", "capital": 4_200}],
+            limits=RiskLimits(account_value=20_000),
+        )
+        self.assertIn("correlated_capital", codes(findings))
+
+    def test_the_count_limit_catches_a_third_name(self):
+        findings = check_portfolio(
+            [{"symbol": "GDX", "capital": 1_000},
+             {"symbol": "SLV", "capital": 1_000},
+             {"symbol": "NEM", "capital": 1_000}],
+            limits=RiskLimits(account_value=100_000),
+        )
+        self.assertIn("correlated_exposure", codes(findings))
+
+    def test_unrelated_names_pass(self):
+        findings = check_portfolio(
+            [{"symbol": "GDX", "capital": 1_000},
+             {"symbol": "CCL", "capital": 1_000},
+             {"symbol": "PFE", "capital": 1_000}],
+            limits=RiskLimits(account_value=100_000),
+        )
+        self.assertEqual(codes(findings) & {"correlated_exposure",
+                                            "correlated_capital"}, set())
+
+    def test_a_proposed_trade_counts_toward_the_group(self):
+        findings = check_portfolio(
+            [{"symbol": "GDX", "capital": 9_500}],
+            proposed={"symbol": "SLV", "capital": 4_200},
+            limits=RiskLimits(account_value=20_000),
+        )
+        self.assertIn("correlated_capital", codes(findings))
+
+    def test_unclassified_symbols_are_not_constrained(self):
+        findings = check_portfolio(
+            [{"symbol": "ZZZZ", "capital": 9_000},
+             {"symbol": "YYYY", "capital": 9_000}],
+            limits=RiskLimits(account_value=100_000),
+        )
+        self.assertEqual(codes(findings) & {"correlated_exposure",
+                                            "correlated_capital"}, set())
+
+    def test_a_ticker_can_belong_to_more_than_one_group(self):
+        from wheelkit.correlation import groups_for
+
+        self.assertIn("china", groups_for("NIO"))
+        self.assertIn("ev and clean energy", groups_for("NIO"))
+
+
+class TestFillLog(unittest.TestCase):
+    """A recommendation you did not take cannot grade the recommender."""
+
+    def setUp(self):
+        from wheelkit.fills import Fill
+
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.path = Path(self.dir.name) / "fills.csv"
+        self.Fill = Fill
+
+    def _fill(self, **kw):
+        base = dict(
+            recorded_at=date(2026, 9, 2), symbol="GDX", right="P",
+            expiration=date(2026, 9, 4), strike=95.0, contracts=1,
+            fill_credit=1.03, scan_file="wheel_scan_results.csv",
+            scan_date=date(2026, 8, 24),
+            suggested_expiration=date(2026, 9, 4), suggested_strike=95.0,
+            suggested_mid=1.03, suggested_limit_likely=1.03,
+        )
+        base.update(kw)
+        return self.Fill(**base)
+
+    def test_a_fill_matching_the_suggestion_has_no_drift(self):
+        from wheelkit.fills import compute_drift
+
+        self.assertEqual(compute_drift(self._fill()), "")
+
+    def test_a_moved_strike_is_drift(self):
+        from wheelkit.fills import compute_drift
+
+        drift = compute_drift(self._fill(strike=90.0))
+        self.assertIn("strike", drift)
+
+    def test_a_moved_expiry_is_drift(self):
+        from wheelkit.fills import compute_drift
+
+        drift = compute_drift(self._fill(expiration=date(2026, 9, 18)))
+        self.assertIn("expiry", drift)
+
+    def test_a_worse_fill_than_the_ladder_is_drift(self):
+        from wheelkit.fills import compute_drift
+
+        drift = compute_drift(self._fill(fill_credit=0.70))
+        self.assertIn("below", drift)
+
+    def test_a_penny_of_slippage_is_not_drift(self):
+        from wheelkit.fills import compute_drift
+
+        self.assertEqual(compute_drift(self._fill(fill_credit=1.02)), "")
+
+    def test_a_trade_with_no_scan_is_logged_but_not_graded(self):
+        from wheelkit.fills import compute_drift
+
+        fill = self._fill(scan_file="", scan_date=None)
+        self.assertEqual(compute_drift(fill), "")
+        self.assertFalse(fill.matches_suggestion)
+
+    def test_round_trip_through_the_file_preserves_everything(self):
+        from wheelkit.fills import append_fill, load_fills
+
+        append_fill(self._fill(), self.path)
+        append_fill(self._fill(symbol="FCX", strike=71.0), self.path)
+        loaded = load_fills(self.path)
+        self.assertEqual([f.symbol for f in loaded], ["GDX", "FCX"])
+        self.assertEqual(loaded[0].scan_date, date(2026, 8, 24))
+        self.assertEqual(loaded[0].suggested_strike, 95.0)
+
+    def test_closing_computes_what_was_kept(self):
+        fill = self._fill()
+        fill.outcome, fill.close_debit = "closed", 0.31
+        self.assertAlmostEqual(fill.realised, 72.0)
+        self.assertAlmostEqual(fill.captured_pct, (1.03 - 0.31) / 1.03)
+
+    def test_an_open_fill_has_no_realised_number(self):
+        fill = self._fill()
+        self.assertNotEqual(fill.realised, fill.realised)
+
+    def test_find_open_ignores_closed_rows(self):
+        from wheelkit.fills import append_fill, find_open, load_fills
+
+        closed = self._fill()
+        closed.outcome = "expired"
+        append_fill(closed, self.path)
+        self.assertIsNone(
+            find_open(load_fills(self.path), "GDX", date(2026, 9, 4), 95.0, "P")
+        )
+
+    def test_the_nearest_strike_is_the_match(self):
+        from wheelkit.fills import Suggestion, best_match
+
+        options = [
+            Suggestion("GDX", "P", date(2026, 9, 4), 95.0, 1.03, 1.03,
+                       -0.18, 11, 71.5),
+            Suggestion("GDX", "P", date(2026, 9, 4), 92.0, 0.61, 0.61,
+                       -0.12, 11, 68.0),
+        ]
+        self.assertEqual(best_match(options, "GDX", "P", 92.5).strike, 92.0)
+        self.assertIsNone(best_match(options, "FCX", "P", 71.0))
+
+
+class TestEarningsFallback(unittest.TestCase):
+    """An exclusion that quietly stops applying is worse than not having it."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.root = Path(self.dir.name)
+        self.overrides = self.root / "earnings.csv"
+        self.overrides.write_text("symbol,earnings_date\n", encoding="utf-8")
+        self.cache = self.root / ".earnings_cache.json"
+
+    def _write_cache(self, age_days: float, horizon: int = 45):
+        import json
+        import time
+
+        self.cache.write_text(json.dumps({
+            "fetched_at": time.time() - age_days * 86400,
+            "horizon_days": horizon,
+            "dates": {"AAPL": "2026-10-29", "MU": "2026-09-24"},
+        }), encoding="utf-8")
+
+    def test_offline_uses_the_cache_instead_of_excluding_nothing(self):
+        # This was the gap: offline skipped the fetch, and the cache was only
+        # reachable through the fetch, so the gate silently applied to nothing.
+        from wheelkit.earnings import EarningsCalendar
+
+        self._write_cache(age_days=6)
+        cal = EarningsCalendar.build(
+            self.overrides, horizon_days=41, offline=True, cache_path=self.cache
+        )
+        self.assertTrue(cal.available)
+        self.assertEqual(cal.next_date("MU"), date(2026, 9, 24))
+        self.assertIn("cache", cal.source)
+
+    def test_a_stale_cache_says_how_stale(self):
+        from wheelkit.earnings import EarningsCalendar
+
+        self._write_cache(age_days=9)
+        cal = EarningsCalendar.build(
+            self.overrides, horizon_days=41, offline=True, cache_path=self.cache
+        )
+        self.assertIn("9 days old", cal.source)
+
+    def test_no_cache_and_no_feed_reports_unavailable(self):
+        from wheelkit.earnings import EarningsCalendar
+
+        cal = EarningsCalendar.build(
+            self.overrides, horizon_days=41, offline=True, cache_path=self.cache
+        )
+        self.assertFalse(cal.available)
+        self.assertIsNone(cal.next_date("MU"))
+
+    def test_overrides_still_win_over_the_cache(self):
+        from wheelkit.earnings import EarningsCalendar
+
+        self._write_cache(age_days=1)
+        self.overrides.write_text(
+            "symbol,earnings_date\nMU,2026-09-30\n", encoding="utf-8"
+        )
+        cal = EarningsCalendar.build(
+            self.overrides, horizon_days=41, offline=True, cache_path=self.cache
+        )
+        self.assertEqual(cal.next_date("MU"), date(2026, 9, 30))
+
+    def test_a_cache_that_does_not_reach_far_enough_is_refused(self):
+        from wheelkit.earnings import EarningsCalendar
+
+        self._write_cache(age_days=1, horizon=10)
+        cal = EarningsCalendar.build(
+            self.overrides, horizon_days=41, offline=True, cache_path=self.cache
+        )
+        self.assertFalse(cal.available)
+
+    def test_a_corrupt_cache_is_ignored_rather_than_raising(self):
+        from wheelkit.earnings import read_cache
+
+        self.cache.write_text("{not json", encoding="utf-8")
+        self.assertIsNone(read_cache(self.cache))
+
+
+class TestCreditFloorIsRelative(unittest.TestCase):
+    """A dollar floor screens on share price, not on what the trade pays."""
+
+    def _entry(self, strike, credit, **kw):
+        base = dict(
+            symbol="XYZ", right="P", strike=strike, spot=strike * 1.12,
+            delta=-0.18, dte=14, credit_per_share=credit, spread_pct=0.05,
+            vrp=1.3, setup="pullback", limits=LIMITS,
+        )
+        base.update(kw)
+        return check_entry(**base)
+
+    def test_the_same_return_passes_at_any_share_price(self):
+        # 0.73% of the strike either way: identical trades, and the old $0.15
+        # floor passed the expensive one and rejected the cheap one.
+        for strike, credit in ((7.54, 0.055), (28.29, 0.207), (94.28, 0.691)):
+            with self.subTest(strike=strike):
+                self.assertNotIn(
+                    "credit_too_thin", codes(self._entry(strike, credit))
+                )
+                self.assertNotIn(
+                    "credit_too_small", codes(self._entry(strike, credit))
+                )
+
+    def test_a_genuinely_thin_credit_is_still_refused(self):
+        # 0.1% of the strike: the premium does not pay for the capital.
+        self.assertIn("credit_too_thin", codes(self._entry(100.0, 0.10)))
+
+    def test_a_tick_of_premium_is_refused_at_any_ratio(self):
+        # 0.5% of a $6 strike, but three cents is one tick and the spread
+        # takes it back on the way out.
+        self.assertIn("credit_too_small", codes(self._entry(6.0, 0.03)))
+
+    def test_the_two_floors_do_not_both_fire(self):
+        findings = codes(self._entry(6.0, 0.03))
+        self.assertNotIn("credit_too_thin", findings)
+
+
+class TestSleeveAndUniverseAgree(unittest.TestCase):
+    """Two commands, two defaults, and nothing checked they matched."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.path = Path(self.dir.name) / "symbols.txt"
+
+    def test_a_matched_pair_is_silent(self):
+        from wheelkit.universe import sleeve_mismatch
+
+        self.assertIsNone(sleeve_mismatch(220, 22_000))
+        self.assertIsNone(sleeve_mismatch(150, 15_000))
+
+    def test_a_sleeve_larger_than_the_ceiling_is_fine(self):
+        # Conservative, not broken: every admitted name still fits.
+        from wheelkit.universe import sleeve_mismatch
+
+        self.assertIsNone(sleeve_mismatch(150, 22_000))
+
+    def test_a_slightly_small_sleeve_warns(self):
+        from wheelkit.universe import sleeve_mismatch
+
+        severity, message = sleeve_mismatch(220, 20_500)
+        self.assertEqual(severity, "warning")
+        self.assertIn("6.8%", message)
+
+    def test_a_far_too_small_sleeve_is_an_error(self):
+        # $15,000 against a $220 ceiling needs a 31.8% OTM strike; the delta
+        # band tops out around 13%, so those names can never be sized.
+        from wheelkit.universe import sleeve_mismatch
+
+        severity, _ = sleeve_mismatch(220, 15_000)
+        self.assertEqual(severity, "error")
+
+    def test_the_fix_can_be_pasted_as_an_argument(self):
+        from wheelkit.universe import sleeve_mismatch
+
+        _, message = sleeve_mismatch(220, 15_000)
+        self.assertIn("--max-cash 22000", message)
+
+    def test_filters_are_read_back_from_the_machine_readable_line(self):
+        from wheelkit.universe import read_filters_file
+
+        self.path.write_text(
+            "# Generated by build_universe.py - do not hand-edit.\n"
+            "# filters: min_price=5 max_price=220 min_dollar_volume=5e+07 "
+            "max_symbols=250\nGDX\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(read_filters_file(self.path)["max_price"], 220.0)
+
+    def test_an_older_universe_is_read_from_its_prose_header(self):
+        # Files built before the machine-readable line still have to be
+        # checkable, or the check silently passes on every existing universe.
+        from wheelkit.universe import read_filters_file
+
+        self.path.write_text(
+            "# Generated by build_universe.py - do not hand-edit.\n"
+            "# Filters: price $5-$150, min $50M/day consolidated volume, "
+            "top 250 by liquidity.\nGDX\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(read_filters_file(self.path)["max_price"], 150.0)
+
+    def test_a_headerless_file_yields_nothing_rather_than_guessing(self):
+        from wheelkit.universe import read_filters_file
+
+        self.path.write_text("GDX\nF\n", encoding="utf-8")
+        self.assertEqual(read_filters_file(self.path), {})
+
+    def test_the_defaults_ship_matched(self):
+        from wheelkit.strategy import WheelConfig
+        from wheelkit.universe import UniverseFilters, sleeve_mismatch
+
+        self.assertIsNone(
+            sleeve_mismatch(UniverseFilters().max_price, WheelConfig().max_cash)
+        )
+
+    def test_the_sleeve_fits_the_per_position_cap(self):
+        # The scanner must not recommend a size the gate then refuses.
+        from wheelkit.risk import RiskLimits
+        from wheelkit.strategy import WheelConfig
+
+        limits = RiskLimits(account_value=100_000)
+        allowed = limits.account_value * limits.max_capital_per_position_pct
+        self.assertGreaterEqual(allowed, WheelConfig().max_cash)

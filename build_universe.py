@@ -36,9 +36,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--max-price",
         type=float,
-        default=150.0,
+        default=220.0,
         help="Highest share price. One contract secures 100 shares, so this "
-             "is your per-position cash ceiling divided by 100.",
+             "is your per-position cash ceiling divided by 100. Keep it equal "
+             "to the scanner's --max-cash / 100.",
     )
     p.add_argument(
         "--min-dollar-volume",
@@ -46,8 +47,10 @@ def parse_args() -> argparse.Namespace:
         default=50_000_000,
         help="Minimum 20-day average consolidated dollar volume",
     )
-    p.add_argument("--max-symbols", type=int, default=250,
-                   help="Keep this many, ranked by liquidity. 0 keeps all.")
+    p.add_argument("--max-symbols", type=int, default=400,
+                   help="Keep this many, ranked by liquidity. 0 keeps all. "
+                        "This is a budget, not a screen: lowering it evicts "
+                        "the least liquid names, which are the cheap ones.")
     p.add_argument("--min-realised-vol", type=float, default=0.15,
                    help="Drop names too quiet to pay premium (e.g. SGOV)")
     p.add_argument("--include-leveraged", action="store_true",
