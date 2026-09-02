@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -25,7 +26,7 @@ from wheelkit.analytics import compute_stats, variance_risk_premium
 from wheelkit.earnings import EarningsCalendar
 from wheelkit.netio import FetchError
 from wheelkit.orders import build_limit_plan, round_to_tick
-from wheelkit.positions import load_positions
+from wheelkit.positions import DEFAULT_SHARES_FILE, load_positions, load_shares
 from wheelkit.pricing import compute_greeks, implied_vol
 from wheelkit.providers import AlpacaProvider
 from wheelkit.report import fmt_num, render_table
@@ -66,6 +67,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("symbol")
     p.add_argument("--shares", type=float, help="Shares held (default: from broker)")
     p.add_argument("--basis", type=float, help="Average cost per share")
+    p.add_argument("--shares-source", choices=("auto", "ibkr", "alpaca", "csv"),
+                   default="auto",
+                   help="Where holdings come from. auto tries each in turn.")
+    p.add_argument("--shares-file", type=Path, default=DEFAULT_SHARES_FILE)
     p.add_argument(
         "--assigned-from", nargs=2, type=float, metavar=("STRIKE", "PUT_CREDIT"),
         help="Derive the basis from the put that assigned you: strike minus credit",
@@ -96,13 +101,29 @@ def resolve_position(
         basis = strike - put_credit
 
     if not shares or not basis:
-        try:
-            held = provider.positions().get(args.symbol.upper())
-        except FetchError:
-            held = None
+        # The broker before the file. This used to read Alpaca only, which on
+        # this machine is a different account entirely - the wheel book lives
+        # at IBKR - so it silently answered about the wrong holdings. And the
+        # basis it fell back to was hand-typed, which is how $135.19 survived
+        # against a lot the broker priced at $132.17.
+        lots, report = load_shares(
+            args.shares_source, provider=provider, path=args.shares_file,
+            host=getattr(args, "host", "127.0.0.1"),
+            port=getattr(args, "port", 7497),
+        )
+        held = lots.get(args.symbol.upper())
         if held:
-            shares = shares or held[0]
-            basis = basis or held[1]
+            shares = shares or held.shares
+            basis = basis or held.basis
+            print(f"Holdings from {held.source}: {held.shares:g} shares at "
+                  f"${held.basis:,.2f} average cost.")
+            if held.source == "csv":
+                print("  This file is hand-maintained; the broker was not "
+                      "reachable. Verify the basis before writing a call.")
+        else:
+            tried = ", ".join(f"{n} ({o})" for n, o in report.attempts)
+            print(f"No {args.symbol.upper()} holding found. Tried: {tried}",
+                  file=sys.stderr)
 
     return shares, basis
 

@@ -1262,3 +1262,56 @@ class TestSleeveAndUniverseAgree(unittest.TestCase):
         limits = RiskLimits(account_value=100_000)
         allowed = limits.account_value * limits.max_capital_per_position_pct
         self.assertGreaterEqual(allowed, WheelConfig().max_cash)
+
+
+class TestShareLoading(unittest.TestCase):
+    """A covered call written against the wrong basis is a silent loss."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.path = Path(self.dir.name) / "shares.csv"
+
+    def test_reads_shares_and_basis(self):
+        from wheelkit.positions import read_shares_csv
+
+        self.path.write_text(
+            "# comment\nsymbol,shares,basis,acquired,note\n"
+            "C,100,135.19,2026-08-21,assigned from the 136 put\n",
+            encoding="utf-8",
+        )
+        lot = read_shares_csv(self.path)["C"]
+        self.assertEqual(lot.shares, 100)
+        self.assertEqual(lot.basis, 135.19)
+        self.assertEqual(lot.acquired, date(2026, 8, 21))
+        self.assertEqual(lot.source, "csv")
+
+    def test_missing_file_is_empty_not_an_error(self):
+        from wheelkit.positions import read_shares_csv
+
+        self.assertEqual(read_shares_csv(self.path), {})
+
+    def test_a_row_without_a_basis_is_skipped(self):
+        from wheelkit.positions import read_shares_csv
+
+        self.path.write_text("symbol,shares,basis\nC,100,\n", encoding="utf-8")
+        self.assertEqual(read_shares_csv(self.path), {})
+
+    def test_an_explicit_source_does_not_fall_back(self):
+        from wheelkit.positions import load_shares
+
+        self.path.write_text(
+            "symbol,shares,basis\nC,100,135.19\n", encoding="utf-8")
+        lots, report = load_shares("csv", path=self.path)
+        self.assertEqual(report.used, "csv")
+        self.assertEqual(lots["C"].basis, 135.19)
+
+    def test_the_file_source_is_not_reported_as_live(self):
+        # The whole point of the report: a hand-typed basis has to announce
+        # itself. This book carried $135.19 for a lot IBKR priced at $132.17.
+        from wheelkit.positions import load_shares
+
+        self.path.write_text(
+            "symbol,shares,basis\nC,100,135.19\n", encoding="utf-8")
+        _, report = load_shares("csv", path=self.path)
+        self.assertFalse(report.is_live)

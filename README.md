@@ -284,7 +284,6 @@ GDX,2026-09-18,89,P,-1,0.94,,2026-09-02
 
 Without it the checkpoint falls back to the flat 21 DTE, which is early for a
 two-week trade.
-
 **Deadlines land on trading days.** "21 DTE" resolves backwards to the nearest
 prior session, never forwards. Subtracting calendar days puts the checkpoint
 on a weekend two weeks in seven and on a holiday a few times a year, and a
@@ -487,6 +486,21 @@ The advisor deliberately runs looser filters than the scanner. You named the
 ticker, so it shows you the menu rather than returning an empty screen.
 
 ### `wheel_covered_call.py` — after you get assigned
+
+Shares and cost basis come from the broker first — IBKR, then Alpaca, then
+`shares.csv` — and the source is always stated:
+
+```
+Holdings from ibkr: 100 shares at $132.17 average cost.
+```
+
+This matters more than it looks. The basis gates every strike in the ladder,
+and it used to be read from Alpaca alone, which on this machine is a different
+account entirely from the one holding the wheel book. Falling through to a
+hand-typed file is how `$135.19` survived against a lot the broker priced at
+`$132.17` — a $302 error on 100 shares, in the number that decides whether a
+strike is "below basis". When the file is used, it says so and tells you to
+verify.
 
 Assignment usually happens because the stock fell, so the shares often arrive
 already underwater. That is the case a plain screen handles worst: strikes
