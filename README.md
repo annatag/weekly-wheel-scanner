@@ -284,6 +284,24 @@ GDX,2026-09-18,89,P,-1,0.94,,2026-09-02
 
 Without it the checkpoint falls back to the flat 21 DTE, which is early for a
 two-week trade.
+
+Positions read from a **broker** carry no entry date at all — IBKR reports what
+you hold, not when you opened it, and its execution history reaches back only
+to the current session. So for those the date comes from the fill log, matched
+on symbol, right, expiry and strike. This is the second reason to record
+fills: it started as a way to grade the scanner, and it turns out to be what
+makes the exit rule correct. The monitor says how many positions are missing
+one rather than quietly using a checkpoint that has already passed:
+
+```
+note: 5 of 6 position(s) have no entry date, so their checkpoint falls back
+      to 21 DTE rather than half the trade's life.
+```
+
+The difference is not cosmetic. A C $138 call written 21 days out reported a
+`21-DTE checkpoint (Aug 21)` — twelve days in the past — and with the fill
+logged became a `10-DTE checkpoint (Sep 01)`.
+
 **Deadlines land on trading days.** "21 DTE" resolves backwards to the nearest
 prior session, never forwards. Subtracting calendar days puts the checkpoint
 on a weekend two weeks in seven and on a holiday a few times a year, and a

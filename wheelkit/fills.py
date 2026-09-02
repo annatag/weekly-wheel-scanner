@@ -306,6 +306,42 @@ def best_match(
     return min(candidates, key=lambda s: abs(s.strike - strike))
 
 
+def entry_date_index(
+    path: Path = DEFAULT_FILLS_FILE,
+) -> dict[tuple[str, str, date, int], date]:
+    """When each logged contract was entered, keyed by the contract itself.
+
+    The checkpoint wants the trade's original length, and a broker position
+    does not carry one: IBKR reports what you hold, not when you opened it,
+    and its execution history only reaches back to the current session. The
+    fill log is the only place that number survives, which is a second reason
+    to keep it - it started as a way to grade the scanner and turns out to be
+    what makes the exit rule correct.
+    """
+    index: dict[tuple[str, str, date, int], date] = {}
+    for fill in load_fills(path):
+        key = (fill.symbol, fill.right, fill.expiration,
+               int(round(fill.strike * 1000)))
+        # Keep the earliest entry: a contract re-entered after a close is
+        # still, for the checkpoint's purposes, a position that began then.
+        if key not in index or fill.recorded_at < index[key]:
+            index[key] = fill.recorded_at
+    return index
+
+
+def entry_date_for(
+    index: dict[tuple[str, str, date, int], date],
+    symbol: str,
+    right: str,
+    expiration: date,
+    strike: float,
+) -> date | None:
+    return index.get(
+        (symbol.upper(), right.upper()[:1], expiration,
+         int(round(strike * 1000)))
+    )
+
+
 def scan_date_of(path: Path) -> date | None:
     """When a scan file was written. Used when no date is given explicitly."""
     try:
