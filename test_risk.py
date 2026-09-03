@@ -1384,3 +1384,103 @@ class TestEntryDatesFromFills(unittest.TestCase):
         expiry = date(2026, 9, 11)
         self.assertEqual(checkpoint_dte_for(expiry, date(2026, 8, 21), LIMITS), 10)
         self.assertEqual(checkpoint_dte_for(expiry, None, LIMITS), 21)
+
+
+class TestEmptyIsNotTheSameAsBlind(unittest.TestCase):
+    """An unreachable broker and an empty book produce the same empty list."""
+
+    def _empty_csv(self, tmp):
+        path = Path(tmp) / "positions.csv"
+        path.write_text(
+            "symbol,expiration,strike,right,quantity,entry_credit\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def test_a_source_that_errored_marks_the_result_incomplete(self):
+        # The reported case: TWS unreachable, nothing else holding options,
+        # and the monitor said "No open option positions found" while six
+        # positions were open.
+        from unittest.mock import patch
+
+        from wheelkit.positions import load_positions
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("wheelkit.positions.read_positions_ibkr",
+                       side_effect=RuntimeError("Could not reach TWS")), \
+                 patch("wheelkit.positions.read_positions_alpaca",
+                       return_value=[]):
+                positions, report = load_positions(
+                    "auto", provider=object(),
+                    path=self._empty_csv(tmp))
+
+        self.assertEqual(positions, [])
+        self.assertTrue(report.incomplete)
+        self.assertEqual([n for n, _ in report.failures], ["ibkr"])
+
+    def test_a_genuinely_empty_book_is_complete(self):
+        from unittest.mock import patch
+
+        from wheelkit.positions import load_positions
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("wheelkit.positions.read_positions_ibkr",
+                       return_value=[]), \
+                 patch("wheelkit.positions.read_positions_alpaca",
+                       return_value=[]):
+                positions, report = load_positions(
+                    "auto", provider=object(),
+                    path=self._empty_csv(tmp))
+
+        self.assertEqual(positions, [])
+        self.assertFalse(report.incomplete)
+        self.assertEqual(report.failures, [])
+
+    def test_answering_with_zero_is_not_a_failure(self):
+        from unittest.mock import patch
+
+        from wheelkit.positions import load_positions
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("wheelkit.positions.read_positions_ibkr",
+                       return_value=[]), \
+                 patch("wheelkit.positions.read_positions_alpaca",
+                       return_value=[]):
+                _, report = load_positions(
+                    "auto", provider=object(), path=self._empty_csv(tmp))
+        self.assertIn(("ibkr", "no positions"), report.attempts)
+        self.assertFalse(report.incomplete)
+
+    def test_a_failure_is_recorded_in_both_places(self):
+        # attempts is what gets printed; failures is what decides the exit
+        # code. A reason missing from either one loses half the signal.
+        from unittest.mock import patch
+
+        from wheelkit.positions import load_positions
+
+        with patch("wheelkit.positions.read_positions_ibkr",
+                   side_effect=RuntimeError("Connect call failed")):
+            _, report = load_positions("auto", path=Path("/nonexistent.csv"))
+        self.assertEqual(dict(report.attempts)["ibkr"], "TWS not reachable")
+        self.assertEqual(dict(report.failures)["ibkr"], "TWS not reachable")
+
+    def test_finding_positions_still_leaves_the_failure_visible(self):
+        # TWS down but the CSV has rows: the answer is usable, and the fact
+        # that the broker was not consulted still has to survive.
+        from unittest.mock import patch
+
+        from wheelkit.positions import load_positions
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "positions.csv"
+            path.write_text(
+                "symbol,expiration,strike,right,quantity,entry_credit\n"
+                "GM,2026-08-21,87,P,-1,1.157\n", encoding="utf-8")
+            with patch("wheelkit.positions.read_positions_ibkr",
+                       side_effect=RuntimeError("Could not reach TWS")):
+                positions, report = load_positions("auto", path=path)
+
+        self.assertEqual(len(positions), 1)
+        self.assertEqual(report.used, "csv")
+        self.assertTrue(report.incomplete)
+        self.assertFalse(report.is_live)

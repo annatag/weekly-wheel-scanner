@@ -308,11 +308,25 @@ class SourceReport:
 
     used: str | None = None
     attempts: list[tuple[str, str]] = field(default_factory=list)
+    # Sources that raised rather than answering. Kept apart from `attempts`
+    # because "this source says you hold nothing" and "this source could not
+    # be asked" are opposite facts that used to print identically.
+    failures: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def is_live(self) -> bool:
         """True when positions came from a broker rather than a local file."""
         return self.used in {"ibkr", "alpaca"}
+
+    @property
+    def incomplete(self) -> bool:
+        """True when a source errored, so an empty result may mean blindness.
+
+        An empty book and an unreachable broker produce the same empty list.
+        Reporting them the same way is how a monitor tells you there is
+        nothing to do while you hold six positions.
+        """
+        return bool(self.failures)
 
 
 def load_positions(
@@ -356,7 +370,9 @@ def load_positions(
             try:
                 found = _one(candidate)
             except Exception as exc:
-                report.attempts.append((candidate, _short_reason(exc)))
+                reason = _short_reason(exc)
+                report.attempts.append((candidate, reason))
+                report.failures.append((candidate, reason))
                 continue
             if found:
                 report.attempts.append((candidate, f"{len(found)} position(s)"))
