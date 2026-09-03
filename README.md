@@ -382,12 +382,49 @@ you want when checking whether TWS is actually reachable.
 ### Running it on a schedule
 
 ```bash
-./scripts/install_monitor.sh
+./scripts/install_schedule.sh
 ```
 
-Weekdays at 15:00 (an hour left to act) and 16:15 (after the close, marks
-settled). Alerts only, so a quiet day produces no output. Remove it with the
-command the installer prints.
+Installs three jobs, weekdays, in the machine's local time:
+
+| | | |
+|---|---|---|
+| 10:30 | `requote` | re-quotes last night's scan and flags anything that gapped |
+| 15:00 | `positions` | open-position alerts |
+| 15:45 | `scan` | builds the watchlist for tomorrow |
+| 16:15 | `positions` | open-position alerts, marks settled |
+
+The pairing is the point: **scan late, trade the next morning.** The 15:45 run
+picks contracts off a full day of price action; the 10:30 run re-prices them
+against the open before you commit, because an option's bid/ask moves far more
+overnight than the stock does.
+
+15:45 rather than after the close, because the scanner needs live quotes.
+Spreads blow out once market makers step back, and an after-hours scan rejects
+most of what it would otherwise surface — `spread too wide` becomes the largest
+rejection bucket. 15:45 is late enough to reflect the day and still inside the
+session.
+
+The morning run **pushes its verdict**, since nobody is watching it:
+
+```
+2 of 3 still tradable.
+1 gapped past the threshold: BAC $62 PUT Sep 11 -2.7%
+1 no longer tradable: APH $75 PUT Sep 18 (spread/quote check)
+```
+
+It exits 1 when anything gapped or dropped out — not an error, but "read this
+before you trade". A clean hold exits 0 and says so explicitly, because the
+whole job of that run is confirmation and silence is not an answer.
+
+A gap is reported separately from a drop-out on purpose. A contract that fails
+the spread check announces itself; a contract that still quotes perfectly well
+while the stock moved 8% under it would otherwise just come back with different
+limit prices and no comment. `--max-gap` sets the threshold, default 5% to
+match the position monitor's daily-move alert.
+
+`./scripts/install_monitor.sh` still installs only the position monitor, if
+that is all you want. Both installers are safe to re-run.
 
 ## Command reference
 

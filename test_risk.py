@@ -1484,3 +1484,49 @@ class TestEmptyIsNotTheSameAsBlind(unittest.TestCase):
         self.assertEqual(report.used, "csv")
         self.assertTrue(report.incomplete)
         self.assertFalse(report.is_live)
+
+
+class TestRequoteVerdict(unittest.TestCase):
+    """The 10:30 run is unattended, so its verdict has to stand alone."""
+
+    def _verdict(self, total=3, refreshed=3, waits=(), gaps=()):
+        import wheel_trade_suggestions as wts
+
+        return wts.summarise_requote(total, [None] * refreshed,
+                                     list(waits), list(gaps))
+
+    def test_a_clean_overnight_hold_says_so_explicitly(self):
+        # The point of the run is confirmation, so silence is not an answer.
+        lines = self._verdict()
+        self.assertIn("3 of 3 still tradable.", lines)
+        self.assertTrue(any("Nothing gapped" in l for l in lines))
+
+    def test_a_gap_is_named_with_its_size_and_direction(self):
+        lines = self._verdict(refreshed=3, gaps=[("BAC $62 PUT Sep 11", -0.027)])
+        gap = next(l for l in lines if "gapped" in l)
+        self.assertIn("BAC $62 PUT Sep 11", gap)
+        self.assertIn("-2.7%", gap)
+
+    def test_a_dropped_contract_is_named_with_its_reason(self):
+        lines = self._verdict(refreshed=2, waits=[("APH $75 PUT", "spread")])
+        wait = next(l for l in lines if "no longer tradable" in l)
+        self.assertIn("APH $75 PUT", wait)
+        self.assertIn("spread", wait)
+
+    def test_gaps_are_reported_before_drops(self):
+        # A contract that still quotes but moved under you is the subtler
+        # problem, so it must not be buried below the obvious one.
+        lines = self._verdict(refreshed=2, waits=[("X", "spread")],
+                              gaps=[("Y", 0.08)])
+        self.assertLess(next(i for i, l in enumerate(lines) if "gapped" in l),
+                        next(i for i, l in enumerate(lines) if "no longer" in l))
+
+    def test_a_gap_and_a_drop_are_counted_separately(self):
+        lines = self._verdict(total=4, refreshed=3, waits=[("X", "spread")],
+                              gaps=[("Y", 0.08)])
+        self.assertIn("3 of 4 still tradable.", lines)
+        self.assertEqual(len(lines), 3)
+
+    def test_the_clean_line_disappears_once_anything_is_wrong(self):
+        lines = self._verdict(refreshed=2, gaps=[("Y", 0.08)])
+        self.assertFalse(any("Nothing gapped" in l for l in lines))
