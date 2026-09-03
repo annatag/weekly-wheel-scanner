@@ -357,6 +357,25 @@ The file is hand-maintained: closed or expired positions keep alerting until
 you edit it, and entry prices are whatever was typed in. A quiet fallback is
 exactly the failure this tool exists to catch, so it is never quiet.
 
+**An empty book and an unreachable broker are reported differently**, because
+they are opposite facts that produce the same empty list. A run that found
+nothing but could not reach every source says so on stderr and exits 2 — even
+under `--alerts-only`, since that is the case the scheduled job most needs to
+raise:
+
+```
+WARNING: found no positions, but not every source answered.
+
+    ibkr     TWS not reachable
+    alpaca   no positions
+    csv      no positions
+```
+
+This replaces a line that printed the literal flag it had been given
+(`Sources tried: auto`) rather than the per-source outcomes it had already
+collected, so a monitor that could not see anything read exactly like a clean
+book. It said that once while six positions were open.
+
 `--source ibkr` refuses to fall back at all and errors instead, which is what
 you want when checking whether TWS is actually reachable.
 

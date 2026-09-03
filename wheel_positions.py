@@ -22,6 +22,7 @@ from wheelkit.netio import FetchError
 from wheelkit.notify import NotifyConfig, dispatch
 from wheelkit.positions import (
     DEFAULT_POSITIONS_FILE,
+    SourceReport,
     OpenOption,
     enrich,
     load_positions,
@@ -95,9 +96,7 @@ def warn_not_live(report, path: Path) -> None:
     print("", file=sys.stderr)
     print("=" * 72, file=sys.stderr)
     print(f"WARNING: positions came from {path}, NOT your broker.", file=sys.stderr)
-    for name, outcome in report.attempts:
-        marker = "<- used" if name == report.used else ""
-        print(f"    {name:<8} {outcome} {marker}", file=sys.stderr)
+    print_attempts(report, stream=sys.stderr)
     print("", file=sys.stderr)
     print("  This file is hand-maintained. Closed or expired positions keep",
           file=sys.stderr)
@@ -266,6 +265,62 @@ def run_check(args: argparse.Namespace, provider: AlpacaProvider,
     return 1 if blocking else 0
 
 
+def report_nothing_found(
+    args: argparse.Namespace, report: SourceReport
+) -> int:
+    """Say whether the book is empty or the monitor simply could not look.
+
+    These are opposite facts and they used to print the same line. A run that
+    could not reach TWS reported "No open option positions found. Sources
+    tried: auto" - the literal flag, not the per-source outcomes it had
+    already collected - which reads exactly like a clean book. It said that
+    once while six positions were open.
+    """
+    if not report.incomplete:
+        if not args.alerts_only:
+            print("No open option positions found.")
+            print_attempts(report, stream=sys.stdout)
+            print(f"For a manual list, create {args.positions_file} with "
+                  "columns symbol,expiration,strike,right,quantity,"
+                  "entry_credit")
+        return 0
+
+    # Never silent, even under --alerts-only: this is the case the scheduled
+    # job most needs to surface, and a quiet exit 0 is indistinguishable from
+    # a quiet all-clear.
+    print("", file=sys.stderr)
+    print("=" * 72, file=sys.stderr)
+    print("WARNING: found no positions, but not every source answered.",
+          file=sys.stderr)
+    print("", file=sys.stderr)
+    print_attempts(report, stream=sys.stderr)
+    print("", file=sys.stderr)
+    print("  A source that errored cannot tell an empty book from an",
+          file=sys.stderr)
+    print("  unreachable one. Start TWS, or re-run with --source csv to",
+          file=sys.stderr)
+    print("  say plainly which answer you want.", file=sys.stderr)
+    print("=" * 72, file=sys.stderr)
+    print("", file=sys.stderr)
+
+    config = NotifyConfig.from_environment(
+        banner=not args.no_banner, push=not args.no_push
+    )
+    dispatch([("position monitor", [Finding(
+        URGENT, "sources_unreachable",
+        "could not read positions: "
+        + "; ".join(f"{name} {reason}" for name, reason in report.failures),
+    )])], config)
+    return 2
+
+
+def print_attempts(report: SourceReport, *, stream=None) -> None:
+    stream = stream or sys.stdout
+    for name, outcome in report.attempts:
+        marker = "<- used" if name == report.used else ""
+        print(f"    {name:<8} {outcome} {marker}".rstrip(), file=stream)
+
+
 def main() -> int:
     args = parse_args()
     limits = RiskLimits(
@@ -306,12 +361,7 @@ def main() -> int:
         return run_check(args, provider, positions, limits)
 
     if not positions:
-        if not args.alerts_only:
-            print("No open option positions found.")
-            print(f"Sources tried: {args.source}. For a manual list, create "
-                  f"{args.positions_file} with columns "
-                  "symbol,expiration,strike,right,quantity,entry_credit")
-        return 0
+        return report_nothing_found(args, source_report)
 
     # A broker reports what you hold, not when you opened it, and TWS's
     # execution history does not reach back past the current session. So the
