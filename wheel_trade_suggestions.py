@@ -44,6 +44,15 @@ def parse_args() -> argparse.Namespace:
                    help="Mark WAIT above this spread instead of suggesting a price")
     p.add_argument("--earnings-file", type=Path, default=Path("earnings.csv"))
     p.add_argument("--offline-earnings", action="store_true")
+    p.add_argument("--max-gap", type=float, default=0.05,
+                   help="Flag a contract whose underlying has moved this far "
+                        "since the scan saved it. Matches the position "
+                        "monitor's daily-move alert.")
+    p.add_argument("--notify", action="store_true",
+                   help="Send the verdict to a banner and a phone. For the "
+                        "scheduled morning run, which nobody is watching.")
+    p.add_argument("--no-banner", action="store_true")
+    p.add_argument("--no-push", action="store_true")
     return p.parse_args()
 
 
@@ -109,7 +118,14 @@ def main() -> int:
         skip_earnings=False,
     )
 
-    refreshed = []
+    refreshed: list = []
+    # Two separate kinds of "do not fire": the contract stopped being
+    # tradable, and the stock moved out from under a still-tradable contract.
+    # The second is the one an overnight hold has to check, and repricing
+    # alone would hide it - the limits would simply come back different.
+    waits: list[tuple[str, str]] = []
+    gaps: list[tuple[str, float]] = []
+
     for row in saved:
         symbol = row["symbol"].strip().upper()
         right = (row.get("right") or "P").strip().upper()[:1]
@@ -119,6 +135,7 @@ def main() -> int:
 
         if expiration <= today:
             print(f"WAIT  {label} — already expired.")
+            waits.append((label, "already expired"))
             continue
 
         try:
@@ -135,10 +152,24 @@ def main() -> int:
             )
         except FetchError as exc:
             print(f"WAIT  {label} — data unavailable ({exc}).")
+            waits.append((label, "data unavailable"))
             continue
+
+        try:
+            saved_spot = float(row.get("spot") or 0)
+        except ValueError:
+            saved_spot = 0.0
+        if saved_spot > 0:
+            gap = (spot - saved_spot) / saved_spot
+            if abs(gap) >= args.max_gap:
+                gaps.append((label, gap))
+                print(f"GAP   {label} — underlying {gap:+.1%} since the scan "
+                      f"(${saved_spot:,.2f} → ${spot:,.2f}). The contract may "
+                      f"still quote; the trade you picked has changed.")
 
         if stats is None or not quotes:
             print(f"WAIT  {label} — the contract no longer quotes.")
+            waits.append((label, "the contract no longer quotes"))
             continue
 
         shares, basis = 0.0, 0.0
@@ -159,6 +190,7 @@ def main() -> int:
         )
         if not candidates:
             print(f"WAIT  {label} — no longer passes the spread/quote check.")
+            waits.append((label, "no longer passes the spread/quote check"))
             continue
 
         candidate = candidates[0]
@@ -183,8 +215,56 @@ def main() -> int:
 
     if getattr(provider, "close", None):
         provider.close()
-    print("No order was placed.")
-    return 0
+
+    verdict = summarise_requote(len(saved), refreshed, waits, gaps)
+    print()
+    for line in verdict:
+        print(f"  {line}")
+    if args.notify:
+        send_requote(verdict, waits, gaps, args)
+
+    print("\nNo order was placed.")
+    # 1 means "read this before you trade", not an error. The scheduled run is
+    # unattended, so a clean overnight hold and a stock that gapped 8% must not
+    # both exit 0.
+    return 1 if (waits or gaps) else 0
+
+
+def summarise_requote(
+    total: int, refreshed: list, waits: list, gaps: list
+) -> list[str]:
+    """The one-glance verdict, in the order it should be acted on."""
+    lines = [f"{len(refreshed)} of {total} still tradable."]
+    if gaps:
+        lines.append(
+            f"{len(gaps)} gapped past the threshold: "
+            + "; ".join(f"{label} {pct:+.1%}" for label, pct in gaps)
+        )
+    if waits:
+        lines.append(
+            f"{len(waits)} no longer tradable: "
+            + "; ".join(f"{label} ({reason})" for label, reason in waits)
+        )
+    if not gaps and not waits:
+        lines.append("Nothing gapped and nothing dropped out overnight.")
+    return lines
+
+
+def send_requote(verdict: list[str], waits: list, gaps: list, args) -> None:
+    """Push the verdict, because nobody is watching the 10:30 run."""
+    from wheelkit.notify import NotifyConfig, dispatch
+    from wheelkit.risk import INFO, URGENT, WARN, Finding
+
+    level = URGENT if gaps else (WARN if waits else INFO)
+    findings = [Finding(level, "requote", line) for line in verdict]
+    config = NotifyConfig.from_environment(
+        banner=not args.no_banner, push=not args.no_push
+    )
+    results = dispatch([("pre-trade check", findings)], config)
+    for channel, ok in results.items():
+        if not ok:
+            print(f"  (note: {channel} notification did not send)",
+                  file=sys.stderr)
 
 
 if __name__ == "__main__":
