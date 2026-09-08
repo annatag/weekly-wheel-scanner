@@ -2077,3 +2077,119 @@ class TestIvRankNeedsHistory(unittest.TestCase):
 
         history = {"X": [(date(2026, 1, 1), 0.30)] * 80}
         self.assertNotEqual(iv_rank("X", 0.30, history), iv_rank("X", 0.30, history))
+
+
+class TestDataBundle(unittest.TestCase):
+    """git clone carries the code and none of the state."""
+
+    def setUp(self):
+        import contextlib
+        import io
+        import wheel_data
+
+        # pack and restore print a summary by design. In a test run that is
+        # noise on top of the report the README tells you to read.
+        self._quiet = contextlib.redirect_stdout(io.StringIO())
+        self.wd = wheel_data
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.old = Path(self.dir.name) / "old"
+        self.new = Path(self.dir.name) / "new"
+        for root in (self.old, self.new):
+            (root / "archive" / "scans").mkdir(parents=True)
+
+    def _seed(self, root, scan_ids=("2026-09-01-1545",)):
+        (root / "positions.csv").write_text(
+            "symbol,expiration,strike,right,quantity,entry_credit\n"
+            "GDX,2026-09-18,89,P,-1,0.94\n", encoding="utf-8")
+        (root / "fills.csv").write_text(
+            "recorded_at,symbol,right,expiration,strike,contracts,fill_credit\n"
+            "2026-09-01,GDX,P,2026-09-18,89,1,0.94\n", encoding="utf-8")
+        (root / "archive" / "atm_iv.csv").write_text(
+            "observed_on,symbol,atm_iv\n2026-09-01,GDX,0.48\n", encoding="utf-8")
+        for sid in scan_ids:
+            (root / "archive" / "scans" / f"{sid}.csv").write_text(
+                "scan_id,symbol,score\n" + f"{sid},GDX,71.5\n", encoding="utf-8")
+
+    def _args(self, **kw):
+        import argparse
+
+        return argparse.Namespace(**kw)
+
+    def _pack(self):
+        bundle = Path(self.dir.name) / "b.tgz"
+        with self._quiet:
+            self.wd.cmd_pack(self._args(root=self.old, output=bundle))
+        return bundle
+
+    def _restore(self, bundle, **kw):
+        import contextlib
+        import io
+
+        base = dict(archive=bundle, root=self.new, force=False, dry_run=False)
+        base.update(kw)
+        with contextlib.redirect_stdout(io.StringIO()):
+            return self.wd.cmd_restore(self._args(**base))
+
+    def test_a_round_trip_carries_the_archive(self):
+        self._seed(self.old)
+        bundle = self._pack()
+        self._restore(bundle)
+        self.assertTrue((self.new / "archive" / "scans" / "2026-09-01-1545.csv").exists())
+        self.assertTrue((self.new / "fills.csv").exists())
+
+    def test_it_refuses_to_clobber_existing_state(self):
+        # Restoring onto a machine that already has positions must stop.
+        self._seed(self.old)
+        self._seed(self.new)
+        bundle = self._pack()
+        self.assertEqual(self._restore(bundle), 1)
+
+    def test_dry_run_changes_nothing(self):
+        self._seed(self.old)
+        bundle = self._pack()
+        self._restore(bundle, dry_run=True)
+        self.assertFalse((self.new / "fills.csv").exists())
+
+    def test_scan_histories_from_two_machines_union(self):
+        # The reason restore merges rather than replacing: dated scan files
+        # from two machines are both real history.
+        self._seed(self.old, scan_ids=("2026-09-01-1545", "2026-09-02-1545"))
+        self._seed(self.new, scan_ids=("2026-09-03-1545",))
+        bundle = self._pack()
+        self._restore(bundle, force=True)
+        kept = sorted(p.stem for p in (self.new / "archive" / "scans").glob("*.csv"))
+        self.assertEqual(
+            kept, ["2026-09-01-1545", "2026-09-02-1545", "2026-09-03-1545"])
+
+    def test_credentials_are_never_bundled(self):
+        # The whole reason keys live in the Keychain is that they are not in
+        # files that get copied around.
+        self._seed(self.old)
+        (self.old / ".env").write_text("ALPACA_API_KEY_ID=secret\n", encoding="utf-8")
+        bundle = self._pack()
+        import tarfile
+
+        with tarfile.open(bundle) as handle:
+            names = handle.getnames()
+        self.assertFalse([n for n in names if ".env" in n])
+
+    def test_a_traversing_member_is_refused(self):
+        # A tarball is untrusted input even when you made it.
+        import io
+        import tarfile
+
+        bundle = Path(self.dir.name) / "evil.tgz"
+        with tarfile.open(bundle, "w:gz") as handle:
+            data = b"pwned"
+            info = tarfile.TarInfo("../escaped.txt")
+            info.size = len(data)
+            handle.addfile(info, io.BytesIO(data))
+        self._restore(bundle, force=True)
+        self.assertFalse((self.new.parent / "escaped.txt").exists())
+
+    def test_the_summary_counts_rows_not_bytes(self):
+        self._seed(self.old)
+        lines = self.wd.describe(self.old)
+        self.assertTrue(any("1 row(s)" in l for l in lines))
+        self.assertTrue(any("more days to IV rank" in l for l in lines))
