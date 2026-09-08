@@ -16,3 +16,5 @@ fills.csv.tmp
 positions.csv.bak*
 shares.csv.bak*
 archive/
+wheelscan-data-*.tgz
+.wheelscan-restore/

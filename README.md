@@ -676,6 +676,43 @@ option expensive *for this name*" has to be written down before it can be
 asked. It becomes usable after roughly 60 sessions, which is why it starts now
 rather than when it is wanted.
 
+### `wheel_data.py` — moving to another machine
+
+`git clone` gets you the code. It gets you none of the state, because all of
+it is gitignored — deliberately, since it is position data.
+
+```bash
+python wheel_data.py pack                              # → wheelscan-data-2026-09-08.tgz
+python wheel_data.py restore wheelscan-data-2026-09-08.tgz
+```
+
+Most of what it carries could be rebuilt. **Two things could not:**
+
+- **`archive/`** — the evaluation harness, whose entire value is that it
+  accumulates. The free data tier carries no option history, so a lost archive
+  cannot be reconstructed from anywhere, and the clock to IV rank restarts at
+  zero.
+- **`fills.csv`** — the only record of what was actually traded, and the only
+  source of entry dates for the checkpoint.
+
+It also carries `positions.csv`, `shares.csv`, `universe/` and the earnings
+cache. The cache is regenerable in principle; in practice it is fetched one
+calendar day at a time and has taken over twenty minutes when the Nasdaq feed
+is slow, so it rides along at 32 KB.
+
+The summary counts rows rather than bytes, because "212 archived candidates,
+59 more days to IV rank" tells you whether the restore worked and "16K" does
+not.
+
+**Credentials are deliberately excluded.** Putting Alpaca keys into a
+plaintext tarball would undo the reason they live in the Keychain. `pack`
+prints the `security find-generic-password` commands to move them yourself.
+
+`restore` refuses to overwrite files that already have content — pass
+`--force`, or `--dry-run` to see what would happen. The one exception is
+`archive/scans`, which **merges**: the files are dated, so two machines'
+histories union cleanly rather than one silently replacing the other.
+
 ### `wheel_fills.py` — what you actually sold
 
 Records entries and exits against the scan that suggested them, so the
