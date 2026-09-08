@@ -184,6 +184,7 @@ class Candidate:
     # Both were computed in compute_stats and never reached scoring.
     rv_percentile: float = float("nan")
     max_drawdown_60d: float = float("nan")
+    gap_down_p05: float = float("nan")
     pe: float | None = None
     peg: float | None = None
 
@@ -318,7 +319,35 @@ def score_safety(candidate: Candidate, cfg: WheelConfig) -> float:
     # itself as a blend. Cushion is the one kept: it already accounts for
     # volatility and time, and the delta band is enforced as a hard gate
     # anyway, so nothing is lost by dropping the softer version of it.
+    # Cushion is measured in standard deviations of a diffusion the stock may
+    # not follow. Assignment on a short put usually arrives as a gap, and two
+    # names with the same cushion_sigmas can gap very differently: measured
+    # live, HOOD realises 55% volatility and KO 14%, yet HOOD's fifth-
+    # percentile overnight gap is -3.5% against KO's -0.7% - a five-fold
+    # difference in the thing that actually causes assignment, and only a
+    # four-fold difference in the volatility the cushion is built from.
+    #
+    # So the cushion is discounted by how many bad opens it can absorb.
+    cushion *= _gap_adequacy(candidate)
+
     return max(0.0, min(100.0, 0.65 * cushion + 0.35 * trend + structural))
+
+
+def _gap_adequacy(candidate: Candidate) -> float:
+    """How many typical bad opens the breakeven can absorb, as a 0.5-1.0 scale.
+
+    Unknown gap history returns 1.0 rather than a penalty: a name with too
+    little price history to measure should not be punished for the gap in the
+    data, only for gaps in the price.
+    """
+    gap = candidate.gap_down_p05
+    cushion_pct = candidate.cushion_pct
+    if gap != gap or gap >= 0 or cushion_pct != cushion_pct or cushion_pct <= 0:
+        return 1.0
+    return _interpolate(
+        cushion_pct / abs(gap),
+        [(1.0, 0.50), (1.5, 0.62), (3.0, 0.82), (5.0, 0.95), (8.0, 1.0)],
+    )
 
 
 def score_quality(candidate: Candidate) -> float:
@@ -534,6 +563,7 @@ def build_candidates(
                 setup=stats.setup,
                 rv_percentile=stats.rv_percentile,
                 max_drawdown_60d=stats.max_drawdown_60d,
+                gap_down_p05=stats.gap_down_p05,
                 move_quarter=stats.move_quarter,
                 move_month=stats.move_20d,
                 pe=(fundamentals or {}).get("pe"),

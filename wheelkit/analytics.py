@@ -40,6 +40,7 @@ class UnderlyingStats:
     resistance_20d: float
     atr14_pct: float
     max_drawdown_60d: float
+    gap_down_p05: float  # 5th-percentile overnight gap, negative
     bars_used: int
 
 
@@ -71,6 +72,32 @@ def parkinson_vol(bars: list[Bar], window: int) -> float:
     factor = 1.0 / (4.0 * math.log(2.0))
     mean_sq = sum(math.log(b.high / b.low) ** 2 for b in recent) / len(recent)
     return math.sqrt(factor * mean_sq * TRADING_DAYS)
+
+
+def overnight_gaps(bars: list[Bar]) -> list[float]:
+    """Open-to-previous-close returns. The moves you cannot trade through."""
+    out = []
+    for previous, current in zip(bars, bars[1:]):
+        if previous.close > 0 and current.open > 0:
+            out.append(current.open / previous.close - 1.0)
+    return out
+
+
+def gap_down_tail(bars: list[Bar], percentile: float = 5.0) -> float:
+    """The bad overnight gap for this name, as a negative return.
+
+    Cushion in standard deviations assumes the price diffuses continuously.
+    Assignment on a short put almost never arrives that way - it arrives as a
+    gap, and a name that gaps 8% on earnings-adjacent news and one that grinds
+    can carry an identical cushion_sigmas while being completely different
+    trades. This measures how the stock has actually opened against itself.
+    """
+    gaps = overnight_gaps(bars)
+    if len(gaps) < 40:
+        return float("nan")
+    gaps.sort()
+    index = max(0, min(len(gaps) - 1, int(len(gaps) * percentile / 100.0)))
+    return gaps[index]
 
 
 def _rv_percentile(closes: list[float], window: int = 20) -> float:
@@ -226,6 +253,7 @@ def compute_stats(bars: list[Bar], spot: float) -> UnderlyingStats | None:
         resistance_20d=max(highs20) if highs20 else float("nan"),
         atr14_pct=atr / spot if atr == atr and spot > 0 else float("nan"),
         max_drawdown_60d=drawdown,
+        gap_down_p05=gap_down_tail(bars),
         bars_used=len(bars),
     )
 

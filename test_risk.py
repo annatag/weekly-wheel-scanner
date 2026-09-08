@@ -1712,3 +1712,67 @@ class TestQuietVolDiscountsTheEdge(unittest.TestCase):
             score_iv_edge(_candidate(vrp=1.4, rv_percentile=50.0)),
             places=6,
         )
+
+
+class TestGapRiskDiscountsTheCushion(unittest.TestCase):
+    """Cushion in sigma assumes a diffusion; assignment arrives as a gap."""
+
+    def test_a_gappy_stock_scores_below_a_grinder(self):
+        # Same cushion, same trend, same everything except how the stock opens.
+        from wheelkit.strategy import WheelConfig, score_safety
+
+        cfg = WheelConfig()
+        grinder = score_safety(
+            _candidate(cushion_pct=0.10, gap_down_p05=-0.007), cfg)
+        gappy = score_safety(
+            _candidate(cushion_pct=0.10, gap_down_p05=-0.035), cfg)
+        self.assertGreater(grinder, gappy)
+
+    def test_unknown_gap_history_is_not_penalised(self):
+        from wheelkit.strategy import WheelConfig, score_safety
+
+        cfg = WheelConfig()
+        unknown = score_safety(
+            _candidate(cushion_pct=0.10, gap_down_p05=float("nan")), cfg)
+        deep = score_safety(
+            _candidate(cushion_pct=0.10, gap_down_p05=-0.005), cfg)
+        self.assertAlmostEqual(unknown, deep, places=6)
+
+    def test_a_cushion_thinner_than_one_bad_open_is_halved(self):
+        from wheelkit.strategy import _gap_adequacy
+
+        self.assertAlmostEqual(
+            _gap_adequacy(_candidate(cushion_pct=0.03, gap_down_p05=-0.03)),
+            0.50, places=6)
+
+    def test_a_deep_cushion_is_untouched(self):
+        from wheelkit.strategy import _gap_adequacy
+
+        self.assertAlmostEqual(
+            _gap_adequacy(_candidate(cushion_pct=0.10, gap_down_p05=-0.005)),
+            1.0, places=6)
+
+    def test_the_tail_needs_enough_history(self):
+        from wheelkit.analytics import Bar, gap_down_tail
+
+        few = [Bar(day=date(2026, 1, 1), open=10, high=10, low=10, close=10,
+                   volume=1)] * 10
+        self.assertNotEqual(gap_down_tail(few), gap_down_tail(few))  # NaN
+
+    def test_the_tail_is_negative_and_ordered(self):
+        from wheelkit.analytics import Bar, gap_down_tail
+
+        import random
+        random.seed(7)
+        bars, price = [], 100.0
+        for i in range(200):
+            gap = random.gauss(0, 0.02)
+            opened = price * (1 + gap)
+            close = opened * (1 + random.gauss(0, 0.01))
+            bars.append(Bar(day=date(2026, 1, 1), open=opened, high=max(opened, close),
+                            low=min(opened, close), close=close, volume=1e6))
+            price = close
+        p05 = gap_down_tail(bars, 5.0)
+        p25 = gap_down_tail(bars, 25.0)
+        self.assertLess(p05, 0)
+        self.assertLess(p05, p25)
