@@ -1989,3 +1989,91 @@ class TestBetaWeightedExposure(unittest.TestCase):
             limits=RiskLimits(account_value=100_000),
         )
         self.assertIn("beta_weighted_exposure", codes(findings))
+
+
+class TestScanArchive(unittest.TestCase):
+    """Ten free observations a run, against one or two traded ones."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.root = Path(self.dir.name)
+
+    def test_every_candidate_is_archived_not_just_the_top(self):
+        # The ones that placed fourth through tenth are the control group.
+        from wheelkit.archive import archive_scan, read_archived_scans
+
+        cands = [_candidate(symbol=f"S{i}", score=float(90 - i)) for i in range(10)]
+        archive_scan(cands, directory=self.root)
+        self.assertEqual(len(read_archived_scans(self.root)), 10)
+
+    def test_an_empty_scan_writes_nothing(self):
+        from wheelkit.archive import archive_scan
+
+        self.assertIsNone(archive_scan([], directory=self.root))
+
+    def test_two_runs_accumulate(self):
+        from datetime import datetime
+
+        from wheelkit.archive import archive_scan, read_archived_scans
+
+        archive_scan([_candidate()], directory=self.root,
+                     when=datetime(2026, 9, 1, 15, 45))
+        archive_scan([_candidate()], directory=self.root,
+                     when=datetime(2026, 9, 2, 15, 45))
+        rows = read_archived_scans(self.root)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({r["scan_id"] for r in rows},
+                         {"2026-09-01-1545", "2026-09-02-1545"})
+
+    def test_the_surface_signals_survive_the_round_trip(self):
+        from wheelkit.archive import archive_scan, read_archived_scans
+
+        archive_scan([_candidate(skew_ratio=1.42, term_slope=1.19)],
+                     directory=self.root)
+        row = read_archived_scans(self.root)[0]
+        self.assertAlmostEqual(float(row["skew_ratio"]), 1.42, places=4)
+        self.assertAlmostEqual(float(row["term_slope"]), 1.19, places=4)
+
+
+class TestIvRankNeedsHistory(unittest.TestCase):
+    """The seed for the one measure that cannot be computed today."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.root = Path(self.dir.name)
+
+    def test_readings_accumulate_across_days(self):
+        from wheelkit.archive import log_atm_iv, read_atm_iv_history
+
+        log_atm_iv({"GDX": 0.48, "KO": 0.22}, directory=self.root,
+                   when=date(2026, 9, 1))
+        log_atm_iv({"GDX": 0.51}, directory=self.root, when=date(2026, 9, 2))
+        history = read_atm_iv_history(self.root)
+        self.assertEqual(len(history["GDX"]), 2)
+        self.assertEqual(len(history["KO"]), 1)
+
+    def test_rank_is_refused_until_there_is_enough(self):
+        # A rank from a fortnight of history is not a rank.
+        from wheelkit.archive import iv_rank, read_atm_iv_history
+
+        for i in range(10):
+            from wheelkit.archive import log_atm_iv
+            log_atm_iv({"X": 0.20 + i * 0.01}, directory=self.root,
+                       when=date(2026, 9, 1))
+        history = read_atm_iv_history(self.root)
+        self.assertNotEqual(iv_rank("X", 0.25, history), iv_rank("X", 0.25, history))
+
+    def test_rank_places_the_value_in_its_own_range(self):
+        from wheelkit.archive import iv_rank
+
+        history = {"X": [(date(2026, 1, 1), 0.10 + i * 0.001) for i in range(80)]}
+        self.assertAlmostEqual(iv_rank("X", 0.10, history), 0.0, places=1)
+        self.assertAlmostEqual(iv_rank("X", 0.179, history), 100.0, places=1)
+
+    def test_a_flat_history_yields_no_rank(self):
+        from wheelkit.archive import iv_rank
+
+        history = {"X": [(date(2026, 1, 1), 0.30)] * 80}
+        self.assertNotEqual(iv_rank("X", 0.30, history), iv_rank("X", 0.30, history))

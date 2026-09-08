@@ -108,10 +108,12 @@ def scan_symbol(
     cost_basis: float = 0.0,
     rejects: Counter[str] | None = None,
     fundamentals: dict[str, dict[str, float | None]] | None = None,
+    atm_readings: dict[str, float] | None = None,
 ) -> tuple[list[Candidate], UnderlyingStats | None, str | None]:
     """Scan one symbol. Returns (candidates, stats, skip_reason)."""
     today = today or date.today()
     rejects = rejects if rejects is not None else Counter()
+    atm_readings = atm_readings if atm_readings is not None else {}
 
     try:
         bars = provider.daily_bars(symbol, 400)
@@ -150,6 +152,13 @@ def scan_symbol(
 
     if not quotes:
         return [], stats, "no contracts in the target strike window"
+
+    # Recorded for every symbol that returned a chain, not only the ones that
+    # produced candidates: IV rank needs the whole distribution, including the
+    # days a name was too expensive or too quiet to surface.
+    front = atm_iv(quotes, stats.spot, today, cfg.risk_free_rate)
+    if front:
+        atm_readings[symbol.upper()] = front[min(front)]
 
     candidates = build_candidates(
         symbol,
@@ -229,7 +238,7 @@ def run_scan(
     positions: dict[str, tuple[float, float]] | None = None,
     fundamentals: dict[str, dict[str, float | None]] | None = None,
     verbose: bool = True,
-) -> tuple[list[Candidate], Counter[str], dict[str, str], ScanContext]:
+) -> tuple[list[Candidate], Counter[str], dict[str, str], ScanContext, dict[str, float]]:
     """Scan the whole universe and return ranked candidates plus diagnostics."""
     context = prepare_context(provider, earnings)
     positions = positions or {}
@@ -237,6 +246,7 @@ def run_scan(
     rejects: Counter[str] = Counter()
     skipped: dict[str, str] = {}
     everything: list[Candidate] = []
+    atm_readings: dict[str, float] = {}
 
     for index, symbol in enumerate(symbols, 1):
         shares, basis = positions.get(symbol, (0.0, 0.0))
@@ -259,6 +269,7 @@ def run_scan(
                 cost_basis=basis,
                 rejects=rejects,
                 fundamentals=fundamentals,
+                atm_readings=atm_readings,
             )
         except Exception as exc:  # keep one bad symbol from ending the scan
             skipped[symbol] = f"error: {exc}"
@@ -272,4 +283,6 @@ def run_scan(
         if verbose:
             print(f"  -> {len(found)} candidate(s)" + (f", {reason}" if reason else ""))
 
-    return rank(everything, cfg), rejects, skipped, context
+    # Every candidate, not only the ranked top N: the ones that placed fourth
+    # through tenth are the control group for any later evaluation.
+    return rank(everything, cfg), rejects, skipped, context, atm_readings

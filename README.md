@@ -611,6 +611,49 @@ Option quotes move far more than the underlying, so run this immediately before
 trading. Contracts that no longer pass the spread check are marked `WAIT`, and
 the original position size is preserved.
 
+### `wheel_backtest.py` — did any of this work?
+
+Every scan is archived. Every ranked candidate is resolved against where the
+underlying actually closed on its expiry, whether or not you traded it.
+
+```bash
+python wheel_backtest.py resolve    # score everything that has matured
+python wheel_backtest.py report     # what the archive says so far
+```
+
+**This exists because the trade log can never answer the question.** Three
+concurrent positions on 7–21 day contracts is 60–100 trades a year; detecting
+a few points of win rate needs several hundred. The scan ranks ten candidates
+a run and you trade one — so nine free observations were being discarded every
+time, including the ones that placed fourth through tenth, which are the
+control group that says whether the ranking put the right contracts on top.
+
+The report leads with the calibration test, because it is the one that can
+falsify the pricing model outright:
+
+```
+  ASSIGNMENT RATE BY DELTA — the calibration test
+    delta 0.10-0.14      2/31   =    6%
+    delta 0.14-0.18      7/44   =   16%
+    delta 0.18-0.22     11/52   =   21%
+```
+
+If 0.20-delta puts assign near 20%, the greeks are honest. Materially higher
+and the cushion is lying — which is exactly what the gap-history discount
+exists to correct.
+
+Buckets thinner than `--min-sample` are marked `(thin)` rather than quietly
+reported, and the score comparison refuses to draw a conclusion below twice
+that. Nothing here changes what the live scan recommends.
+
+`archive/atm_iv.csv` accumulates one at-the-money reading per symbol per day —
+including symbols that produced no candidate, since IV rank needs the whole
+distribution. That is the seed for the only measure this toolkit cannot
+compute at all today: the free tier carries no option history, so "is this
+option expensive *for this name*" has to be written down before it can be
+asked. It becomes usable after roughly 60 sessions, which is why it starts now
+rather than when it is wanted.
+
 ### `wheel_fills.py` — what you actually sold
 
 Records entries and exits against the scan that suggested them, so the
