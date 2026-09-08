@@ -1859,3 +1859,48 @@ class TestTermStructureVetoes(unittest.TestCase):
         modest_and_calm = score_candidate(
             _candidate(annualised_return=0.25, vrp=1.3, term_slope=0.95), cfg, 70.0).score
         self.assertLess(rich_and_dated, modest_and_calm)
+
+
+class TestTickGridIsNotIlliquidity(unittest.TestCase):
+    """A percentage spread cannot tell the grid from a thin market."""
+
+    def test_the_tick_helpers_moved_but_still_import_from_orders(self):
+        # orders.py re-exports them, so existing callers keep working.
+        from wheelkit.orders import round_to_tick, tick_size
+        from wheelkit.pricing import tick_size as pricing_tick
+
+        self.assertIs(tick_size, pricing_tick)
+        self.assertEqual(tick_size(0.20), 0.01)
+        self.assertEqual(tick_size(3.50), 0.05)
+        self.assertEqual(round_to_tick(1.234), 1.23)
+
+    def test_a_two_tick_spread_is_not_scored_as_illiquid(self):
+        # $0.19/$0.21 is 10% wide and physically cannot be tighter.
+        from wheelkit.strategy import WheelConfig, score_liquidity
+
+        cfg = WheelConfig()
+        at_grid = score_liquidity(
+            _candidate(bid=0.19, ask=0.21, mid=0.20, spread_pct=0.10), cfg)
+        genuinely_wide = score_liquidity(
+            _candidate(bid=2.85, ask=3.15, mid=3.00, spread_pct=0.10), cfg)
+        self.assertGreater(at_grid, genuinely_wide)
+        self.assertGreaterEqual(at_grid, 75.0 * 0.65)
+
+    def test_a_wide_cheap_spread_is_still_punished(self):
+        # $0.15/$0.25 is five ticks: that is a thin market, not the grid.
+        from wheelkit.strategy import WheelConfig, score_liquidity
+
+        cfg = WheelConfig()
+        grid = score_liquidity(
+            _candidate(bid=0.19, ask=0.21, mid=0.20, spread_pct=0.10), cfg)
+        wide = score_liquidity(
+            _candidate(bid=0.15, ask=0.25, mid=0.20, spread_pct=0.50), cfg)
+        self.assertLess(wide, grid)
+
+    def test_exit_spread_percent_is_not_new_information(self):
+        # Recorded because the audit originally proposed gating on it: the
+        # exit ratio is exactly twice the entry ratio for every quote, so it
+        # can never reorder anything. Ticks were the measure worth adding.
+        for mid, spread in ((0.20, 0.02), (1.00, 0.10), (3.00, 0.30)):
+            self.assertAlmostEqual(
+                spread / (0.5 * mid), 2.0 * (spread / mid), places=9)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 
 SQRT_2PI = math.sqrt(2 * math.pi)
 DAYS_PER_YEAR = 365.0
@@ -279,3 +280,19 @@ def _inverse_norm_cdf(p: float) -> float:
         * z
         / (((((b[0] * r_val + b[1]) * r_val + b[2]) * r_val + b[3]) * r_val + b[4]) * r_val + 1)
     )
+
+
+# US option quoting increments: a penny below $3.00, a nickel at or above it.
+# Rounding to the wrong increment produces a limit the exchange will reject.
+PENNY_THRESHOLD = 3.00
+
+
+def tick_size(price: float) -> float:
+    return 0.01 if price < PENNY_THRESHOLD else 0.05
+
+
+def round_to_tick(price: float, mode: str = "nearest") -> float:
+    tick = Decimal(str(tick_size(price)))
+    value = Decimal(str(max(price, 0.0)))
+    rounding = ROUND_DOWN if mode == "down" else ROUND_HALF_UP
+    return float((value / tick).quantize(Decimal("1"), rounding=rounding) * tick)

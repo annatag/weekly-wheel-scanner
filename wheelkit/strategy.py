@@ -31,7 +31,7 @@ from .analytics import (
     setup_score,
     variance_risk_premium,
 )
-from .pricing import compute_greeks, expected_move, implied_vol
+from .pricing import compute_greeks, expected_move, implied_vol, tick_size
 from .providers import Quote
 
 DAYS_PER_YEAR = 365.0
@@ -69,6 +69,12 @@ class WheelConfig:
     # not report it, and gating on a field that is always None rejects
     # everything.
     max_spread_pct: float = 0.12
+    # A percentage spread cannot tell the tick grid from illiquidity. A $0.20
+    # contract quoted 0.19/0.21 is 10% wide and physically cannot be tighter;
+    # a $3.00 contract at 10% is six nickels wide and genuinely thin. Judging
+    # both by percentage penalises cheap options for the grid they trade on -
+    # the same bias the dollar credit floor had.
+    tolerated_spread_ticks: int = 2
     min_option_volume: float = 5
     min_quote_size: float = 1
     # The credit floor is relative, not absolute. A flat $0.15 is the one gate
@@ -299,6 +305,13 @@ def score_liquidity(candidate: Candidate, cfg: WheelConfig) -> float:
         [(0.01, 100.0), (0.03, 85.0), (0.06, 60.0), (cfg.max_spread_pct, 25.0),
          (cfg.max_spread_pct * 1.5, 0.0)],
     )
+    # Do not punish a contract for the tick grid it trades on. At or inside
+    # the tolerated tick count the quote is as tight as the exchange permits,
+    # whatever that works out to as a percentage.
+    width = candidate.ask - candidate.bid
+    ticks = width / tick_size(candidate.mid) if candidate.mid > 0 else 99.0
+    if ticks <= cfg.tolerated_spread_ticks:
+        spread = max(spread, 75.0)
     volume = _interpolate(
         candidate.option_volume, [(0.0, 0.0), (25.0, 45.0), (200.0, 80.0), (1000.0, 100.0)]
     )
@@ -495,8 +508,9 @@ def build_candidates(
             rejects["no two-sided quote"] += 1
             continue
         if quote.spread_pct > cfg.max_spread_pct:
-            rejects["spread too wide"] += 1
-            continue
+            if quote.spread > cfg.tolerated_spread_ticks * tick_size(quote.mid) + 1e-9:
+                rejects["spread too wide"] += 1
+                continue
         if quote.mid < cfg.min_credit_per_share:
             rejects["credit below the tick floor"] += 1
             continue
