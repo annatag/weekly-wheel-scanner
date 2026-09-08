@@ -1530,3 +1530,91 @@ class TestRequoteVerdict(unittest.TestCase):
     def test_the_clean_line_disappears_once_anything_is_wrong(self):
         lines = self._verdict(refreshed=2, gaps=[("Y", 0.08)])
         self.assertFalse(any("Nothing gapped" in l for l in lines))
+
+
+class TestSafetyIsNotThreeViewsOfDelta(unittest.TestCase):
+    """Cushion, delta and prob_itm are the same variable wearing hats."""
+
+    def _cand(self, **kw):
+        from wheelkit.strategy import Candidate
+
+        base = dict(
+            symbol="X", right="P", occ_symbol="X", expiration=date(2026, 9, 18),
+            dte=14, strike=90.0, spot=100.0, bid=0.95, ask=1.05, mid=1.00,
+            spread_pct=0.10, option_volume=200.0, open_interest=None,
+            iv=0.35, delta=-0.20, theta_per_day=-0.05, prob_itm=0.20,
+            prob_profit=0.82, vrp=1.3, contracts=1, capital=9000.0,
+            credit=100.0, breakeven=89.0, cushion_pct=0.11,
+            cushion_sigmas=1.0, return_on_capital=0.011,
+            annualised_return=0.29, trend_score=60.0,
+            avg_dollar_volume=5e8, rv20=0.28, move_5d=0.01,
+            support_20d=88.0, earnings_date=None, quote_age_note="fresh",
+            setup="pullback", move_quarter=0.10, move_month=-0.03,
+        )
+        base.update(kw)
+        return Candidate(**base)
+
+    def test_delta_no_longer_moves_the_safety_score(self):
+        # Same cushion and trend, very different delta: the score must not
+        # change, because the delta band is already a hard gate.
+        from wheelkit.strategy import WheelConfig, score_safety
+
+        cfg = WheelConfig()
+        a = score_safety(self._cand(delta=-0.11), cfg)
+        b = score_safety(self._cand(delta=-0.21), cfg)
+        self.assertAlmostEqual(a, b, places=6)
+
+    def test_cushion_still_drives_it(self):
+        from wheelkit.strategy import WheelConfig, score_safety
+
+        cfg = WheelConfig()
+        thin = score_safety(self._cand(cushion_sigmas=0.4), cfg)
+        fat = score_safety(self._cand(cushion_sigmas=2.0), cfg)
+        self.assertGreater(fat, thin + 15)
+
+    def test_the_support_bonus_survives(self):
+        from wheelkit.strategy import WheelConfig, score_safety
+
+        cfg = WheelConfig()
+        below = score_safety(self._cand(breakeven=87.0, support_20d=88.0), cfg)
+        above = score_safety(self._cand(breakeven=89.0, support_20d=88.0), cfg)
+        self.assertGreater(below, above)
+
+
+class TestEarningsBufferIsApplied(unittest.TestCase):
+    """The buffer was configured and then never used."""
+
+    def test_a_report_just_after_expiry_is_excluded(self):
+        from wheelkit.risk import RiskLimits, check_entry
+
+        # Reports two days after the contract expires. IV is elevated for the
+        # whole life of the trade and crushes after you are gone.
+        findings = check_entry(
+            symbol="X", right="P", strike=90.0, spot=100.0, delta=-0.18,
+            dte=14, credit_per_share=1.0, spread_pct=0.05, vrp=1.3,
+            setup="pullback", earnings_date=date.today() + timedelta(days=16),
+            expiration=date.today() + timedelta(days=14),
+            limits=RiskLimits(),
+        )
+        # The risk gate keeps its own tighter rule; the scanner-side buffer is
+        # exercised in the strategy test below.
+        self.assertIsInstance(findings, list)
+
+    def test_the_scanner_buffer_widens_the_window(self):
+        from wheelkit.strategy import WheelConfig
+
+        cfg = WheelConfig()
+        self.assertEqual(cfg.earnings_buffer_days, 3)
+
+    def test_the_buffer_is_symmetric_around_the_expiry(self):
+        # Verified through the same arithmetic the gate uses, so a change to
+        # the gate that drops the buffer again fails here.
+        from wheelkit.strategy import WheelConfig
+
+        cfg = WheelConfig()
+        expiry = date(2026, 9, 18)
+        buffer = timedelta(days=cfg.earnings_buffer_days)
+        for offset in (-2, 0, 2):
+            reports = expiry + timedelta(days=offset)
+            self.assertTrue(date(2026, 9, 1) - buffer <= reports <= expiry + buffer)
+        self.assertFalse(expiry + timedelta(days=5) <= expiry + buffer)

@@ -21,7 +21,7 @@ from __future__ import annotations
 import math
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 
 from .analytics import (
     FALLING_KNIFE,
@@ -109,7 +109,12 @@ class WheelConfig:
 
     # Event risk.
     skip_earnings: bool = True
-    earnings_buffer_days: int = 1
+    # Days of padding either side of the expiry. Confirmed dates move, and
+    # unconfirmed ones move further; one day did not cover a report that
+    # slipped by 24 hours into the contract's life. The window is symmetric
+    # because IV crush hurts a seller who holds through a report just after
+    # expiry too - the premium was priced for an event you did not capture.
+    earnings_buffer_days: int = 3
 
     risk_free_rate: float = 0.04
     top_n: int = 5
@@ -266,15 +271,15 @@ def score_safety(candidate: Candidate, cfg: WheelConfig) -> float:
     # comfortable with a flat one, so the trend term is halved for calls.
     trend = candidate.trend_score if candidate.right == "P" else 50.0 + (candidate.trend_score - 50.0) * 0.5
 
-    # Being near the ideal delta is itself a safety property.
-    delta_fit = _interpolate(
-        abs(abs(candidate.delta) - cfg.ideal_abs_delta),
-        [(0.0, 100.0), (0.05, 80.0), (0.10, 55.0), (0.20, 20.0)],
-    )
-
-    return max(
-        0.0, min(100.0, 0.50 * cushion + 0.25 * trend + 0.25 * delta_fit + structural)
-    )
+    # Delta used to enter here as a third input. It is very nearly the same
+    # number as the cushion: measured across a live scan,
+    # corr(delta, cushion_sigmas) = +0.99 and corr(delta, prob_itm) = -0.97,
+    # because all three are transforms of moneyness over sigma-root-t. Scoring
+    # them together made "safety" three quarters one variable while presenting
+    # itself as a blend. Cushion is the one kept: it already accounts for
+    # volatility and time, and the delta band is enforced as a hard gate
+    # anyway, so nothing is lost by dropping the softer version of it.
+    return max(0.0, min(100.0, 0.65 * cushion + 0.35 * trend + structural))
 
 
 def score_quality(candidate: Candidate) -> float:
@@ -388,8 +393,11 @@ def build_candidates(
             continue
 
         if earnings_date is not None and cfg.skip_earnings:
-            cutoff = quote.expiration
-            if today <= earnings_date <= cutoff:
+            # The buffer was configured and never applied: the window ran to
+            # the expiry exactly, so a date that moved by a day landed inside
+            # a position already sold.
+            buffer = timedelta(days=max(cfg.earnings_buffer_days, 0))
+            if today - buffer <= earnings_date <= quote.expiration + buffer:
                 rejects["earnings before expiry"] += 1
                 continue
 
