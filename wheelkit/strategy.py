@@ -181,6 +181,9 @@ class Candidate:
     setup: str = "unknown"
     move_quarter: float = float("nan")
     move_month: float = float("nan")
+    # Both were computed in compute_stats and never reached scoring.
+    rv_percentile: float = float("nan")
+    max_drawdown_60d: float = float("nan")
     pe: float | None = None
     peg: float | None = None
 
@@ -199,6 +202,30 @@ def _interpolate(x: float, points: list[tuple[float, float]]) -> float:
             span = x1 - x0
             return y0 if span <= 0 else y0 + (y1 - y0) * (x - x0) / span
     return points[-1][1]
+
+
+def score_setup(candidate: Candidate) -> float:
+    """Trend classification, corrected for how far the stock has already fallen.
+
+    The classifier reads a quarter and a month. That is enough to separate a
+    dip inside an uptrend from a name in free fall, and not enough to notice
+    that a "pullback" on a stock 30% below its 60-day high is a downtrend with
+    one good month in it. The drawdown is the missing context, and it was
+    already being computed and thrown away.
+
+    Applied to pullback and rebound only. Momentum sits near its highs by
+    definition, and a falling knife never reaches scoring.
+    """
+    base = setup_score(candidate.setup)
+    drawdown = candidate.max_drawdown_60d
+    if drawdown != drawdown or candidate.setup not in ("pullback", "rebound"):
+        return base
+
+    # drawdown is negative: -0.30 means 30% below the 60-day peak.
+    return base * _interpolate(
+        abs(min(drawdown, 0.0)),
+        [(0.10, 1.0), (0.20, 0.85), (0.30, 0.62), (0.45, 0.35)],
+    )
 
 
 def score_premium(candidate: Candidate, cfg: WheelConfig) -> float:
@@ -231,6 +258,18 @@ def score_iv_edge(candidate: Candidate) -> float:
     )
     if vrp > 2.5:
         base *= 0.75
+
+    # VRP divides implied by *trailing* realised. When realised volatility is
+    # unusually quiet for this name the denominator is small for reasons that
+    # tend not to last, and the ratio reads as edge when it is really a low
+    # base. rv_percentile locates the current regime in the stock's own
+    # one-year history, and was also computed and discarded. Only the low end
+    # is adjusted - a high realised percentile makes VRP conservative, which
+    # needs no correction.
+    percentile = candidate.rv_percentile
+    if percentile == percentile and percentile < 25.0:
+        base *= _interpolate(percentile, [(0.0, 0.80), (25.0, 1.0)])
+
     return min(100.0, base)
 
 
@@ -295,7 +334,7 @@ def score_candidate(candidate: Candidate, cfg: WheelConfig, regime: float) -> Ca
         "premium": score_premium(candidate, cfg),
         "iv_edge": score_iv_edge(candidate),
         "safety": score_safety(candidate, cfg),
-        "setup": setup_score(candidate.setup),
+        "setup": score_setup(candidate),
         "liquidity": score_liquidity(candidate, cfg),
         "quality": score_quality(candidate),
         "regime": regime,
@@ -493,6 +532,8 @@ def build_candidates(
                 earnings_date=earnings_date,
                 quote_age_note=_quote_age_note(quote, market_open),
                 setup=stats.setup,
+                rv_percentile=stats.rv_percentile,
+                max_drawdown_60d=stats.max_drawdown_60d,
                 move_quarter=stats.move_quarter,
                 move_month=stats.move_20d,
                 pe=(fundamentals or {}).get("pe"),

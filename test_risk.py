@@ -1618,3 +1618,97 @@ class TestEarningsBufferIsApplied(unittest.TestCase):
             reports = expiry + timedelta(days=offset)
             self.assertTrue(date(2026, 9, 1) - buffer <= reports <= expiry + buffer)
         self.assertFalse(expiry + timedelta(days=5) <= expiry + buffer)
+
+
+def _candidate(**kw):
+    """A scoreable candidate. Shared by the scoring tests below."""
+    from wheelkit.strategy import Candidate
+
+    base = dict(
+        symbol="X", right="P", occ_symbol="X", expiration=date(2026, 9, 18),
+        dte=14, strike=90.0, spot=100.0, bid=0.95, ask=1.05, mid=1.00,
+        spread_pct=0.10, option_volume=200.0, open_interest=None,
+        iv=0.35, delta=-0.20, theta_per_day=-0.05, prob_itm=0.20,
+        prob_profit=0.82, vrp=1.3, contracts=1, capital=9000.0,
+        credit=100.0, breakeven=89.0, cushion_pct=0.11, cushion_sigmas=1.0,
+        return_on_capital=0.011, annualised_return=0.29, trend_score=60.0,
+        avg_dollar_volume=5e8, rv20=0.28, move_5d=0.01, support_20d=88.0,
+        earnings_date=None, quote_age_note="fresh", setup="pullback",
+        move_quarter=0.10, move_month=-0.03,
+    )
+    base.update(kw)
+    return Candidate(**base)
+
+
+class TestDrawdownCorrectsTheSetup(unittest.TestCase):
+    """A pullback 30% off the high is a downtrend with one good month."""
+
+    def test_a_shallow_dip_keeps_the_full_setup_score(self):
+        from wheelkit.strategy import score_setup
+
+        self.assertAlmostEqual(
+            score_setup(_candidate(max_drawdown_60d=-0.05)), 100.0, places=6)
+
+    def test_a_deep_drawdown_downgrades_a_pullback(self):
+        from wheelkit.strategy import score_setup
+
+        deep = score_setup(_candidate(max_drawdown_60d=-0.30))
+        self.assertLess(deep, 70.0)
+        self.assertGreater(deep, 0.0)
+
+    def test_momentum_is_untouched(self):
+        # Momentum is near its highs by definition; the correction would be
+        # double-counting the same fact.
+        from wheelkit.strategy import score_setup
+
+        a = score_setup(_candidate(setup="momentum", max_drawdown_60d=-0.30))
+        b = score_setup(_candidate(setup="momentum", max_drawdown_60d=-0.02))
+        self.assertAlmostEqual(a, b, places=6)
+
+    def test_a_missing_drawdown_does_not_penalise(self):
+        from wheelkit.strategy import score_setup
+
+        self.assertAlmostEqual(
+            score_setup(_candidate(max_drawdown_60d=float("nan"))), 100.0, places=6)
+
+
+class TestQuietVolDiscountsTheEdge(unittest.TestCase):
+    """A small realised denominator flatters VRP."""
+
+    def test_an_unusually_quiet_stock_is_discounted(self):
+        from wheelkit.strategy import score_iv_edge
+
+        # The discount ramps from 0.80 at the very bottom up to 1.0 at the
+        # 25th percentile, so it is a slope rather than a cliff.
+        floor = score_iv_edge(_candidate(vrp=1.4, rv_percentile=0.0))
+        quiet = score_iv_edge(_candidate(vrp=1.4, rv_percentile=12.5))
+        normal = score_iv_edge(_candidate(vrp=1.4, rv_percentile=60.0))
+        self.assertAlmostEqual(floor, normal * 0.80, places=4)
+        self.assertAlmostEqual(quiet, normal * 0.90, places=4)
+        self.assertLess(quiet, normal)
+
+    def test_a_normal_regime_is_untouched(self):
+        from wheelkit.strategy import score_iv_edge
+
+        self.assertAlmostEqual(
+            score_iv_edge(_candidate(vrp=1.4, rv_percentile=40.0)),
+            score_iv_edge(_candidate(vrp=1.4, rv_percentile=90.0)),
+            places=6,
+        )
+
+    def test_a_high_realised_percentile_is_not_boosted(self):
+        # VRP is already conservative there; rewarding it would double-count.
+        from wheelkit.strategy import score_iv_edge
+
+        base = score_iv_edge(_candidate(vrp=1.4, rv_percentile=50.0))
+        self.assertLessEqual(
+            score_iv_edge(_candidate(vrp=1.4, rv_percentile=99.0)), base + 1e-9)
+
+    def test_a_missing_percentile_does_not_discount(self):
+        from wheelkit.strategy import score_iv_edge
+
+        self.assertAlmostEqual(
+            score_iv_edge(_candidate(vrp=1.4, rv_percentile=float("nan"))),
+            score_iv_edge(_candidate(vrp=1.4, rv_percentile=50.0)),
+            places=6,
+        )
