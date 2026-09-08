@@ -1904,3 +1904,88 @@ class TestTickGridIsNotIlliquidity(unittest.TestCase):
         for mid, spread in ((0.20, 0.02), (1.00, 0.10), (3.00, 0.30)):
             self.assertAlmostEqual(
                 spread / (0.5 * mid), 2.0 * (spread / mid), places=9)
+
+
+class TestBetaWeightedExposure(unittest.TestCase):
+    """Correlation groups catch pairs someone wrote down. Beta catches the rest."""
+
+    def _bars(self, returns):
+        from wheelkit.analytics import Bar
+
+        bars, price = [], 100.0
+        for r in returns:
+            price *= (1 + r)
+            bars.append(Bar(day=date(2026, 1, 1), open=price, high=price,
+                            low=price, close=price, volume=1e6))
+        return bars
+
+    def test_a_stock_against_itself_has_beta_one(self):
+        from wheelkit.analytics import beta
+
+        import random
+        random.seed(3)
+        moves = [random.gauss(0, 0.01) for _ in range(80)]
+        bars = self._bars(moves)
+        self.assertAlmostEqual(beta(bars, bars), 1.0, places=6)
+
+    def test_a_doubled_stock_has_beta_two(self):
+        from wheelkit.analytics import beta
+
+        import random
+        random.seed(4)
+        moves = [random.gauss(0, 0.01) for _ in range(80)]
+        self.assertAlmostEqual(
+            beta(self._bars([2 * m for m in moves]), self._bars(moves)),
+            2.0, delta=0.05)
+
+    def test_too_little_history_is_nan_not_one(self):
+        # A missing beta must be visible as missing, not assumed neutral.
+        from wheelkit.analytics import beta
+
+        short = self._bars([0.01] * 10)
+        self.assertNotEqual(beta(short, short), beta(short, short))
+
+    def test_a_defensive_book_passes(self):
+        from wheelkit.risk import RiskLimits, check_portfolio
+
+        findings = check_portfolio(
+            [{"symbol": "KO", "capital": 20_000, "beta": 0.4},
+             {"symbol": "XLU", "capital": 20_000, "beta": 0.3}],
+            limits=RiskLimits(account_value=100_000),
+        )
+        self.assertNotIn("beta_weighted_exposure", codes(findings))
+
+    def test_three_uncorrelated_sectors_can_still_be_one_bet(self):
+        # None of these share a sector or a correlation group.
+        from wheelkit.risk import RiskLimits, check_portfolio
+
+        findings = check_portfolio(
+            [{"symbol": "NVDA", "capital": 20_000, "beta": 2.0},
+             {"symbol": "TSLA", "capital": 20_000, "beta": 3.1},
+             {"symbol": "MARA", "capital": 15_000, "beta": 2.65}],
+            limits=RiskLimits(account_value=100_000),
+        )
+        self.assertIn("beta_weighted_exposure", codes(findings))
+
+    def test_a_missing_beta_counts_at_one_and_says_so(self):
+        from wheelkit.risk import RiskLimits, check_portfolio
+
+        findings = check_portfolio(
+            [{"symbol": "A", "capital": 40_000, "beta": 2.0},
+             {"symbol": "B", "capital": 40_000}],
+            limits=RiskLimits(account_value=100_000),
+        )
+        finding = next(f for f in findings if f.code == "beta_weighted_exposure")
+        self.assertIn("1 without a beta", finding.message)
+
+    def test_a_short_beta_still_adds_exposure(self):
+        # An inverse position is not a hedge for these purposes; it is another
+        # directional bet. Magnitude is what the cap measures.
+        from wheelkit.risk import RiskLimits, check_portfolio
+
+        findings = check_portfolio(
+            [{"symbol": "A", "capital": 45_000, "beta": -1.0},
+             {"symbol": "B", "capital": 45_000, "beta": 1.0}],
+            limits=RiskLimits(account_value=100_000),
+        )
+        self.assertIn("beta_weighted_exposure", codes(findings))

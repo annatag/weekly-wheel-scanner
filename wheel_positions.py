@@ -15,7 +15,7 @@ import sys
 from datetime import date, datetime
 from pathlib import Path
 
-from wheelkit.analytics import compute_stats
+from wheelkit.analytics import beta, compute_stats
 from wheelkit.earnings import EarningsCalendar
 from wheelkit.fills import DEFAULT_FILLS_FILE, entry_date_for, entry_date_index
 from wheelkit.netio import FetchError
@@ -265,6 +265,32 @@ def run_check(args: argparse.Namespace, provider: AlpacaProvider,
     return 1 if blocking else 0
 
 
+def position_betas(provider, symbols: set[str]) -> dict[str, float]:
+    """60-day beta against SPY for each held name.
+
+    One extra bar request per position plus one for SPY. The book is capped
+    at three positions, so this is four calls on a monitor that already makes
+    several per position. A symbol whose bars cannot be fetched is simply
+    absent, and the portfolio check counts it at 1.0 and says so.
+    """
+    if not symbols:
+        return {}
+    try:
+        market = provider.daily_bars("SPY", 120)
+    except FetchError:
+        return {}
+
+    out: dict[str, float] = {}
+    for symbol in sorted(symbols):
+        try:
+            value = beta(provider.daily_bars(symbol, 120), market)
+        except FetchError:
+            continue
+        if value == value:
+            out[symbol] = value
+    return out
+
+
 def report_nothing_found(
     args: argparse.Namespace, report: SourceReport
 ) -> int:
@@ -397,8 +423,13 @@ def main() -> int:
             entry_date=position.entry_date, limits=limits,
         )
 
+    betas = position_betas(provider, {p.symbol for p in positions})
     portfolio = check_portfolio(
-        [{"symbol": p.symbol, "capital": p.capital} for p in positions],
+        [
+            {"symbol": p.symbol, "capital": p.capital,
+             "beta": betas.get(p.symbol, float("nan"))}
+            for p in positions
+        ],
         limits=limits,
     )
     flagged = [p for p in positions if p.findings]

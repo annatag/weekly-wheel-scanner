@@ -100,6 +100,36 @@ def gap_down_tail(bars: list[Bar], percentile: float = 5.0) -> float:
     return gaps[index]
 
 
+def beta(stock_bars: list[Bar], market_bars: list[Bar], window: int = 60) -> float:
+    """Sensitivity of the stock to the market, from overlapping daily returns.
+
+    The correlation groups already in `risk` catch pairs someone thought to
+    write down. Beta catches the exposure nobody labelled: three positions in
+    three unrelated sectors, each with a beta near 2, is one leveraged bet on
+    the index wearing three tickers. Capital committed says they are diverse;
+    beta-weighted capital says they are not.
+
+    Returns NaN rather than 1.0 when it cannot be computed. A missing beta
+    should be visible as missing, not silently assumed to be market-neutral.
+    """
+    stock = _returns([b.close for b in stock_bars][-(window + 1):])
+    market = _returns([b.close for b in market_bars][-(window + 1):])
+    size = min(len(stock), len(market))
+    if size < 30:
+        return float("nan")
+    stock, market = stock[-size:], market[-size:]
+
+    mean_market = sum(market) / size
+    variance = sum((m - mean_market) ** 2 for m in market)
+    if variance <= 0:
+        return float("nan")
+    mean_stock = sum(stock) / size
+    covariance = sum(
+        (s - mean_stock) * (m - mean_market) for s, m in zip(stock, market)
+    )
+    return covariance / variance
+
+
 def _rv_percentile(closes: list[float], window: int = 20) -> float:
     """Rank today's 20-day realised vol against every other 20-day window."""
     if len(closes) < window + 60:
