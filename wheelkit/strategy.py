@@ -23,6 +23,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
+from .volsurface import atm_iv, skew_ratio
 from .analytics import (
     FALLING_KNIFE,
     PULLBACK,
@@ -108,6 +109,12 @@ class WheelConfig:
     min_annualised_return: float = 0.12
 
     # Event risk.
+    # Front-month implied volatility above a later expiry's is the signature
+    # of a dated catalyst, including the ones no earnings feed lists. Costs
+    # one extra chain request per symbol that produced candidates, which is a
+    # small fraction of symbols scanned.
+    check_term_structure: bool = True
+    term_back_dte: int = 45
     skip_earnings: bool = True
     # Days of padding either side of the expiry. Confirmed dates move, and
     # unconfirmed ones move further; one day did not cover a report that
@@ -185,6 +192,8 @@ class Candidate:
     rv_percentile: float = float("nan")
     max_drawdown_60d: float = float("nan")
     gap_down_p05: float = float("nan")
+    skew_ratio: float = float("nan")   # strike IV over at-the-money IV
+    term_slope: float = float("nan")   # front ATM IV over a later expiry's
     pe: float | None = None
     peg: float | None = None
 
@@ -270,6 +279,16 @@ def score_iv_edge(candidate: Candidate) -> float:
     percentile = candidate.rv_percentile
     if percentile == percentile and percentile < 25.0:
         base *= _interpolate(percentile, [(0.0, 0.80), (25.0, 1.0)])
+
+    # Skew separates two things VRP cannot. A contract can be rich against
+    # realised because the whole surface is rich - which is harvestable - or
+    # because this particular strike sits on a steep wing, which means the
+    # market is paying specifically for the tail you are selling. Ordinary
+    # equity skew runs about 1.05-1.15, so only what is clearly beyond that
+    # is discounted.
+    skew = candidate.skew_ratio
+    if skew == skew and skew > 1.15:
+        base *= _interpolate(skew, [(1.15, 1.0), (1.35, 0.85), (1.70, 0.65)])
 
     return min(100.0, base)
 
@@ -369,11 +388,36 @@ def score_candidate(candidate: Candidate, cfg: WheelConfig, regime: float) -> Ca
         "regime": regime,
     }
     total_weight = sum(cfg.weights.values()) or 1.0
+    blended = sum(subscores[k] * w for k, w in cfg.weights.items()) / total_weight
+
+    # Event risk multiplies rather than averages. A weighted mean lets a
+    # superb premium score carry a candidate that is priced for a catalyst,
+    # which is exactly backwards: premium selling is a business of avoiding
+    # disasters, not of maximising averages. A multiplier can veto; a 4% term
+    # cannot.
+    event = event_multiplier(candidate)
+    subscores["event_multiplier"] = round(event * 100.0, 1)
+
     candidate.subscores = subscores
-    candidate.score = round(
-        sum(subscores[k] * w for k, w in cfg.weights.items()) / total_weight, 1
-    )
+    candidate.score = round(blended * event, 1)
     return candidate
+
+
+def event_multiplier(candidate: Candidate) -> float:
+    """0.55-1.00 from the term structure. Unknown slope is not penalised.
+
+    Front-month implied volatility above a later expiry's means the market has
+    priced something into this contract's life and not the next one. That is
+    the only reading available here that can see an unlisted catalyst - a
+    court date, an FDA decision, a deal vote - which is precisely the risk the
+    earnings calendar was never going to cover.
+    """
+    slope = candidate.term_slope
+    if slope != slope:
+        return 1.0
+    return _interpolate(
+        slope, [(1.05, 1.0), (1.15, 0.85), (1.30, 0.65), (1.50, 0.55)]
+    )
 
 
 def size_position(strike: float, cfg: WheelConfig) -> tuple[int, float] | None:
@@ -432,6 +476,12 @@ def build_candidates(
     results: list[Candidate] = []
     spot = stats.spot
 
+    # One at-the-money reference per expiry, computed before the loop so every
+    # strike in that expiry is measured against the same denominator.
+    atm_by_expiry = atm_iv(
+        [q for q in quotes if q.right == right], spot, today, cfg.risk_free_rate
+    )
+
     for quote in quotes:
         if quote.right != right:
             continue
@@ -483,8 +533,15 @@ def build_candidates(
         if greeks is None:
             rejects["greeks unavailable"] += 1
             continue
-        if not cfg.min_abs_delta <= abs(greeks.delta) <= cfg.max_abs_delta:
-            rejects["delta outside band"] += 1
+        if abs(greeks.delta) > cfg.max_abs_delta:
+            # Includes the near-the-money strikes fetched only as a skew
+            # reference, which is why this is counted apart from the band's
+            # far edge - lumping them together made the delta gate look far
+            # busier than it is.
+            rejects["delta above the band (incl. ATM reference)"] += 1
+            continue
+        if abs(greeks.delta) < cfg.min_abs_delta:
+            rejects["delta below the band"] += 1
             continue
 
         vrp = variance_risk_premium(iv, stats.rv20, stats.rv60)
@@ -561,6 +618,7 @@ def build_candidates(
                 earnings_date=earnings_date,
                 quote_age_note=_quote_age_note(quote, market_open),
                 setup=stats.setup,
+                skew_ratio=skew_ratio(iv, atm_by_expiry.get(quote.expiration, float("nan"))),
                 rv_percentile=stats.rv_percentile,
                 max_drawdown_60d=stats.max_drawdown_60d,
                 gap_down_p05=stats.gap_down_p05,

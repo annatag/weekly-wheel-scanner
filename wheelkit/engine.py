@@ -12,6 +12,7 @@ from .earnings import EarningsCalendar
 from .netio import FetchError
 from .pricing import strike_for_delta
 from .providers import Provider, Quote
+from .volsurface import atm_iv, term_slope
 from .strategy import (
     Candidate,
     WheelConfig,
@@ -80,7 +81,18 @@ def strike_window(
     near = strike_for_delta(spot, cfg.max_abs_delta, cfg.max_dte / 365, vol, right=right)
     far = strike_for_delta(spot, cfg.min_abs_delta, cfg.min_dte / 365, vol, right=right)
     low, high = min(near, far), max(near, far)
-    return low * (1 - STRIKE_PAD), high * (1 + STRIKE_PAD)
+    low, high = low * (1 - STRIKE_PAD), high * (1 + STRIKE_PAD)
+
+    # Reach to the money as well. Skew is only meaningful against an
+    # at-the-money reference, and pulling it in the same request costs one
+    # widened range rather than a second round trip per symbol. The extra
+    # strikes are inside the delta band's near edge, so they are rejected at
+    # scoring - into their own bucket, not the band's.
+    if right == "P":
+        high = max(high, spot * 1.02)
+    else:
+        low = min(low, spot * 0.98)
+    return low, high
 
 
 def scan_symbol(
@@ -153,9 +165,58 @@ def scan_symbol(
         stats_counter=rejects,
         fundamentals=(fundamentals or {}).get(symbol.upper()),
     )
+    if candidates and cfg.check_term_structure:
+        slope = term_structure_slope(provider, symbol, stats.spot, cfg, today)
+        for candidate in candidates:
+            candidate.term_slope = slope
+
     for candidate in candidates:
         score_candidate(candidate, cfg, context.regime_score)
     return candidates, stats, None
+
+
+def term_structure_slope(
+    provider: Provider,
+    symbol: str,
+    spot: float,
+    cfg: WheelConfig,
+    today: date,
+) -> float:
+    """Front ATM implied vol over a later expiry's, or NaN if unavailable.
+
+    Deliberately called only for symbols that produced candidates. Most
+    symbols scanned produce none, so paying for a second chain request on
+    every one of them would roughly double the run for information about
+    contracts already rejected.
+
+    A failure here returns NaN rather than raising: an unavailable back month
+    should cost the candidate its term-structure signal, not its place in the
+    scan.
+    """
+    try:
+        front = provider.option_chain(
+            symbol,
+            expiry_from=today + timedelta(days=cfg.min_dte),
+            expiry_to=today + timedelta(days=cfg.max_dte),
+            strike_min=spot * 0.97, strike_max=spot * 1.03, right="P",
+        )
+        back = provider.option_chain(
+            symbol,
+            expiry_from=today + timedelta(days=cfg.term_back_dte),
+            expiry_to=today + timedelta(days=cfg.term_back_dte + 30),
+            strike_min=spot * 0.97, strike_max=spot * 1.03, right="P",
+        )
+    except FetchError:
+        return float("nan")
+
+    front_atm = atm_iv(front, spot, today, cfg.risk_free_rate)
+    back_atm = atm_iv(back, spot, today, cfg.risk_free_rate)
+    if not front_atm or not back_atm:
+        return float("nan")
+
+    # Nearest expiry on the front, furthest on the back: the widest span the
+    # two windows offer, which is where the signal is clearest.
+    return term_slope(front_atm[min(front_atm)], back_atm[max(back_atm)])
 
 
 def run_scan(

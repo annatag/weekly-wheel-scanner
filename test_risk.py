@@ -1776,3 +1776,86 @@ class TestGapRiskDiscountsTheCushion(unittest.TestCase):
         p25 = gap_down_tail(bars, 25.0)
         self.assertLess(p05, 0)
         self.assertLess(p05, p25)
+
+
+class TestSkewSeparatesEdgeFromInsurance(unittest.TestCase):
+    """Rich against realised is harvestable; rich on the wing is a fee."""
+
+    def test_ordinary_skew_is_not_penalised(self):
+        from wheelkit.strategy import score_iv_edge
+
+        flat = score_iv_edge(_candidate(vrp=1.4, skew_ratio=1.00))
+        normal = score_iv_edge(_candidate(vrp=1.4, skew_ratio=1.12))
+        self.assertAlmostEqual(flat, normal, places=6)
+
+    def test_a_steep_wing_is_discounted(self):
+        from wheelkit.strategy import score_iv_edge
+
+        normal = score_iv_edge(_candidate(vrp=1.4, skew_ratio=1.10))
+        steep = score_iv_edge(_candidate(vrp=1.4, skew_ratio=1.50))
+        self.assertLess(steep, normal * 0.85)
+
+    def test_unknown_skew_is_neutral(self):
+        from wheelkit.strategy import score_iv_edge
+
+        self.assertAlmostEqual(
+            score_iv_edge(_candidate(vrp=1.4, skew_ratio=float("nan"))),
+            score_iv_edge(_candidate(vrp=1.4, skew_ratio=1.05)),
+            places=6,
+        )
+
+    def test_the_ratio_is_strike_iv_over_atm(self):
+        from wheelkit.volsurface import skew_ratio
+
+        self.assertAlmostEqual(skew_ratio(0.60, 0.40), 1.5, places=6)
+        self.assertNotEqual(skew_ratio(0.4, 0.0), skew_ratio(0.4, 0.0))  # NaN
+
+
+class TestTermStructureVetoes(unittest.TestCase):
+    """A weighted mean lets premium carry a candidate priced for an event."""
+
+    def test_contango_is_not_penalised(self):
+        from wheelkit.strategy import event_multiplier
+
+        self.assertAlmostEqual(event_multiplier(_candidate(term_slope=0.90)), 1.0)
+        self.assertAlmostEqual(event_multiplier(_candidate(term_slope=1.05)), 1.0)
+
+    def test_backwardation_cuts_the_score(self):
+        from wheelkit.strategy import event_multiplier
+
+        self.assertLess(event_multiplier(_candidate(term_slope=1.20)), 0.80)
+        self.assertLess(event_multiplier(_candidate(term_slope=1.50)), 0.60)
+
+    def test_unknown_slope_does_not_penalise(self):
+        # An unavailable back month should cost the signal, not the candidate.
+        from wheelkit.strategy import event_multiplier
+
+        self.assertAlmostEqual(
+            event_multiplier(_candidate(term_slope=float("nan"))), 1.0)
+
+    def test_it_multiplies_the_whole_score(self):
+        from wheelkit.strategy import WheelConfig, score_candidate
+
+        cfg = WheelConfig()
+        calm = score_candidate(_candidate(term_slope=0.95), cfg, 70.0).score
+        evt = score_candidate(_candidate(term_slope=1.30), cfg, 70.0).score
+        self.assertAlmostEqual(evt, round(calm * 0.65, 1), delta=0.6)
+
+    def test_the_multiplier_is_reported_in_the_subscores(self):
+        from wheelkit.strategy import WheelConfig, score_candidate
+
+        cfg = WheelConfig()
+        scored = score_candidate(_candidate(term_slope=1.30), cfg, 70.0)
+        self.assertIn("event_multiplier", scored.subscores)
+        self.assertAlmostEqual(scored.subscores["event_multiplier"], 65.0, delta=1.0)
+
+    def test_a_high_premium_no_longer_outruns_a_priced_event(self):
+        # The case the multiplicative form exists for.
+        from wheelkit.strategy import WheelConfig, score_candidate
+
+        cfg = WheelConfig()
+        rich_and_dated = score_candidate(
+            _candidate(annualised_return=0.60, vrp=1.8, term_slope=1.40), cfg, 70.0).score
+        modest_and_calm = score_candidate(
+            _candidate(annualised_return=0.25, vrp=1.3, term_slope=0.95), cfg, 70.0).score
+        self.assertLess(rich_and_dated, modest_and_calm)
