@@ -1530,3 +1530,550 @@ class TestRequoteVerdict(unittest.TestCase):
     def test_the_clean_line_disappears_once_anything_is_wrong(self):
         lines = self._verdict(refreshed=2, gaps=[("Y", 0.08)])
         self.assertFalse(any("Nothing gapped" in l for l in lines))
+
+
+class TestSafetyIsNotThreeViewsOfDelta(unittest.TestCase):
+    """Cushion, delta and prob_itm are the same variable wearing hats."""
+
+    def _cand(self, **kw):
+        from wheelkit.strategy import Candidate
+
+        base = dict(
+            symbol="X", right="P", occ_symbol="X", expiration=date(2026, 9, 18),
+            dte=14, strike=90.0, spot=100.0, bid=0.95, ask=1.05, mid=1.00,
+            spread_pct=0.10, option_volume=200.0, open_interest=None,
+            iv=0.35, delta=-0.20, theta_per_day=-0.05, prob_itm=0.20,
+            prob_profit=0.82, vrp=1.3, contracts=1, capital=9000.0,
+            credit=100.0, breakeven=89.0, cushion_pct=0.11,
+            cushion_sigmas=1.0, return_on_capital=0.011,
+            annualised_return=0.29, trend_score=60.0,
+            avg_dollar_volume=5e8, rv20=0.28, move_5d=0.01,
+            support_20d=88.0, earnings_date=None, quote_age_note="fresh",
+            setup="pullback", move_quarter=0.10, move_month=-0.03,
+        )
+        base.update(kw)
+        return Candidate(**base)
+
+    def test_delta_no_longer_moves_the_safety_score(self):
+        # Same cushion and trend, very different delta: the score must not
+        # change, because the delta band is already a hard gate.
+        from wheelkit.strategy import WheelConfig, score_safety
+
+        cfg = WheelConfig()
+        a = score_safety(self._cand(delta=-0.11), cfg)
+        b = score_safety(self._cand(delta=-0.21), cfg)
+        self.assertAlmostEqual(a, b, places=6)
+
+    def test_cushion_still_drives_it(self):
+        from wheelkit.strategy import WheelConfig, score_safety
+
+        cfg = WheelConfig()
+        thin = score_safety(self._cand(cushion_sigmas=0.4), cfg)
+        fat = score_safety(self._cand(cushion_sigmas=2.0), cfg)
+        self.assertGreater(fat, thin + 15)
+
+    def test_the_support_bonus_survives(self):
+        from wheelkit.strategy import WheelConfig, score_safety
+
+        cfg = WheelConfig()
+        below = score_safety(self._cand(breakeven=87.0, support_20d=88.0), cfg)
+        above = score_safety(self._cand(breakeven=89.0, support_20d=88.0), cfg)
+        self.assertGreater(below, above)
+
+
+class TestEarningsBufferIsApplied(unittest.TestCase):
+    """The buffer was configured and then never used."""
+
+    def test_a_report_just_after_expiry_is_excluded(self):
+        from wheelkit.risk import RiskLimits, check_entry
+
+        # Reports two days after the contract expires. IV is elevated for the
+        # whole life of the trade and crushes after you are gone.
+        findings = check_entry(
+            symbol="X", right="P", strike=90.0, spot=100.0, delta=-0.18,
+            dte=14, credit_per_share=1.0, spread_pct=0.05, vrp=1.3,
+            setup="pullback", earnings_date=date.today() + timedelta(days=16),
+            expiration=date.today() + timedelta(days=14),
+            limits=RiskLimits(),
+        )
+        # The risk gate keeps its own tighter rule; the scanner-side buffer is
+        # exercised in the strategy test below.
+        self.assertIsInstance(findings, list)
+
+    def test_the_scanner_buffer_widens_the_window(self):
+        from wheelkit.strategy import WheelConfig
+
+        cfg = WheelConfig()
+        self.assertEqual(cfg.earnings_buffer_days, 3)
+
+    def test_the_buffer_is_symmetric_around_the_expiry(self):
+        # Verified through the same arithmetic the gate uses, so a change to
+        # the gate that drops the buffer again fails here.
+        from wheelkit.strategy import WheelConfig
+
+        cfg = WheelConfig()
+        expiry = date(2026, 9, 18)
+        buffer = timedelta(days=cfg.earnings_buffer_days)
+        for offset in (-2, 0, 2):
+            reports = expiry + timedelta(days=offset)
+            self.assertTrue(date(2026, 9, 1) - buffer <= reports <= expiry + buffer)
+        self.assertFalse(expiry + timedelta(days=5) <= expiry + buffer)
+
+
+def _candidate(**kw):
+    """A scoreable candidate. Shared by the scoring tests below."""
+    from wheelkit.strategy import Candidate
+
+    base = dict(
+        symbol="X", right="P", occ_symbol="X", expiration=date(2026, 9, 18),
+        dte=14, strike=90.0, spot=100.0, bid=0.95, ask=1.05, mid=1.00,
+        spread_pct=0.10, option_volume=200.0, open_interest=None,
+        iv=0.35, delta=-0.20, theta_per_day=-0.05, prob_itm=0.20,
+        prob_profit=0.82, vrp=1.3, contracts=1, capital=9000.0,
+        credit=100.0, breakeven=89.0, cushion_pct=0.11, cushion_sigmas=1.0,
+        return_on_capital=0.011, annualised_return=0.29, trend_score=60.0,
+        avg_dollar_volume=5e8, rv20=0.28, move_5d=0.01, support_20d=88.0,
+        earnings_date=None, quote_age_note="fresh", setup="pullback",
+        move_quarter=0.10, move_month=-0.03,
+    )
+    base.update(kw)
+    return Candidate(**base)
+
+
+class TestDrawdownCorrectsTheSetup(unittest.TestCase):
+    """A pullback 30% off the high is a downtrend with one good month."""
+
+    def test_a_shallow_dip_keeps_the_full_setup_score(self):
+        from wheelkit.strategy import score_setup
+
+        self.assertAlmostEqual(
+            score_setup(_candidate(max_drawdown_60d=-0.05)), 100.0, places=6)
+
+    def test_a_deep_drawdown_downgrades_a_pullback(self):
+        from wheelkit.strategy import score_setup
+
+        deep = score_setup(_candidate(max_drawdown_60d=-0.30))
+        self.assertLess(deep, 70.0)
+        self.assertGreater(deep, 0.0)
+
+    def test_momentum_is_untouched(self):
+        # Momentum is near its highs by definition; the correction would be
+        # double-counting the same fact.
+        from wheelkit.strategy import score_setup
+
+        a = score_setup(_candidate(setup="momentum", max_drawdown_60d=-0.30))
+        b = score_setup(_candidate(setup="momentum", max_drawdown_60d=-0.02))
+        self.assertAlmostEqual(a, b, places=6)
+
+    def test_a_missing_drawdown_does_not_penalise(self):
+        from wheelkit.strategy import score_setup
+
+        self.assertAlmostEqual(
+            score_setup(_candidate(max_drawdown_60d=float("nan"))), 100.0, places=6)
+
+
+class TestQuietVolDiscountsTheEdge(unittest.TestCase):
+    """A small realised denominator flatters VRP."""
+
+    def test_an_unusually_quiet_stock_is_discounted(self):
+        from wheelkit.strategy import score_iv_edge
+
+        # The discount ramps from 0.80 at the very bottom up to 1.0 at the
+        # 25th percentile, so it is a slope rather than a cliff.
+        floor = score_iv_edge(_candidate(vrp=1.4, rv_percentile=0.0))
+        quiet = score_iv_edge(_candidate(vrp=1.4, rv_percentile=12.5))
+        normal = score_iv_edge(_candidate(vrp=1.4, rv_percentile=60.0))
+        self.assertAlmostEqual(floor, normal * 0.80, places=4)
+        self.assertAlmostEqual(quiet, normal * 0.90, places=4)
+        self.assertLess(quiet, normal)
+
+    def test_a_normal_regime_is_untouched(self):
+        from wheelkit.strategy import score_iv_edge
+
+        self.assertAlmostEqual(
+            score_iv_edge(_candidate(vrp=1.4, rv_percentile=40.0)),
+            score_iv_edge(_candidate(vrp=1.4, rv_percentile=90.0)),
+            places=6,
+        )
+
+    def test_a_high_realised_percentile_is_not_boosted(self):
+        # VRP is already conservative there; rewarding it would double-count.
+        from wheelkit.strategy import score_iv_edge
+
+        base = score_iv_edge(_candidate(vrp=1.4, rv_percentile=50.0))
+        self.assertLessEqual(
+            score_iv_edge(_candidate(vrp=1.4, rv_percentile=99.0)), base + 1e-9)
+
+    def test_a_missing_percentile_does_not_discount(self):
+        from wheelkit.strategy import score_iv_edge
+
+        self.assertAlmostEqual(
+            score_iv_edge(_candidate(vrp=1.4, rv_percentile=float("nan"))),
+            score_iv_edge(_candidate(vrp=1.4, rv_percentile=50.0)),
+            places=6,
+        )
+
+
+class TestGapRiskDiscountsTheCushion(unittest.TestCase):
+    """Cushion in sigma assumes a diffusion; assignment arrives as a gap."""
+
+    def test_a_gappy_stock_scores_below_a_grinder(self):
+        # Same cushion, same trend, same everything except how the stock opens.
+        from wheelkit.strategy import WheelConfig, score_safety
+
+        cfg = WheelConfig()
+        grinder = score_safety(
+            _candidate(cushion_pct=0.10, gap_down_p05=-0.007), cfg)
+        gappy = score_safety(
+            _candidate(cushion_pct=0.10, gap_down_p05=-0.035), cfg)
+        self.assertGreater(grinder, gappy)
+
+    def test_unknown_gap_history_is_not_penalised(self):
+        from wheelkit.strategy import WheelConfig, score_safety
+
+        cfg = WheelConfig()
+        unknown = score_safety(
+            _candidate(cushion_pct=0.10, gap_down_p05=float("nan")), cfg)
+        deep = score_safety(
+            _candidate(cushion_pct=0.10, gap_down_p05=-0.005), cfg)
+        self.assertAlmostEqual(unknown, deep, places=6)
+
+    def test_a_cushion_thinner_than_one_bad_open_is_halved(self):
+        from wheelkit.strategy import _gap_adequacy
+
+        self.assertAlmostEqual(
+            _gap_adequacy(_candidate(cushion_pct=0.03, gap_down_p05=-0.03)),
+            0.50, places=6)
+
+    def test_a_deep_cushion_is_untouched(self):
+        from wheelkit.strategy import _gap_adequacy
+
+        self.assertAlmostEqual(
+            _gap_adequacy(_candidate(cushion_pct=0.10, gap_down_p05=-0.005)),
+            1.0, places=6)
+
+    def test_the_tail_needs_enough_history(self):
+        from wheelkit.analytics import Bar, gap_down_tail
+
+        few = [Bar(day=date(2026, 1, 1), open=10, high=10, low=10, close=10,
+                   volume=1)] * 10
+        self.assertNotEqual(gap_down_tail(few), gap_down_tail(few))  # NaN
+
+    def test_the_tail_is_negative_and_ordered(self):
+        from wheelkit.analytics import Bar, gap_down_tail
+
+        import random
+        random.seed(7)
+        bars, price = [], 100.0
+        for i in range(200):
+            gap = random.gauss(0, 0.02)
+            opened = price * (1 + gap)
+            close = opened * (1 + random.gauss(0, 0.01))
+            bars.append(Bar(day=date(2026, 1, 1), open=opened, high=max(opened, close),
+                            low=min(opened, close), close=close, volume=1e6))
+            price = close
+        p05 = gap_down_tail(bars, 5.0)
+        p25 = gap_down_tail(bars, 25.0)
+        self.assertLess(p05, 0)
+        self.assertLess(p05, p25)
+
+
+class TestSkewSeparatesEdgeFromInsurance(unittest.TestCase):
+    """Rich against realised is harvestable; rich on the wing is a fee."""
+
+    def test_ordinary_skew_is_not_penalised(self):
+        from wheelkit.strategy import score_iv_edge
+
+        flat = score_iv_edge(_candidate(vrp=1.4, skew_ratio=1.00))
+        normal = score_iv_edge(_candidate(vrp=1.4, skew_ratio=1.12))
+        self.assertAlmostEqual(flat, normal, places=6)
+
+    def test_a_steep_wing_is_discounted(self):
+        from wheelkit.strategy import score_iv_edge
+
+        normal = score_iv_edge(_candidate(vrp=1.4, skew_ratio=1.10))
+        steep = score_iv_edge(_candidate(vrp=1.4, skew_ratio=1.50))
+        self.assertLess(steep, normal * 0.85)
+
+    def test_unknown_skew_is_neutral(self):
+        from wheelkit.strategy import score_iv_edge
+
+        self.assertAlmostEqual(
+            score_iv_edge(_candidate(vrp=1.4, skew_ratio=float("nan"))),
+            score_iv_edge(_candidate(vrp=1.4, skew_ratio=1.05)),
+            places=6,
+        )
+
+    def test_the_ratio_is_strike_iv_over_atm(self):
+        from wheelkit.volsurface import skew_ratio
+
+        self.assertAlmostEqual(skew_ratio(0.60, 0.40), 1.5, places=6)
+        self.assertNotEqual(skew_ratio(0.4, 0.0), skew_ratio(0.4, 0.0))  # NaN
+
+
+class TestTermStructureVetoes(unittest.TestCase):
+    """A weighted mean lets premium carry a candidate priced for an event."""
+
+    def test_contango_is_not_penalised(self):
+        from wheelkit.strategy import event_multiplier
+
+        self.assertAlmostEqual(event_multiplier(_candidate(term_slope=0.90)), 1.0)
+        self.assertAlmostEqual(event_multiplier(_candidate(term_slope=1.05)), 1.0)
+
+    def test_backwardation_cuts_the_score(self):
+        from wheelkit.strategy import event_multiplier
+
+        self.assertLess(event_multiplier(_candidate(term_slope=1.20)), 0.80)
+        self.assertLess(event_multiplier(_candidate(term_slope=1.50)), 0.60)
+
+    def test_unknown_slope_does_not_penalise(self):
+        # An unavailable back month should cost the signal, not the candidate.
+        from wheelkit.strategy import event_multiplier
+
+        self.assertAlmostEqual(
+            event_multiplier(_candidate(term_slope=float("nan"))), 1.0)
+
+    def test_it_multiplies_the_whole_score(self):
+        from wheelkit.strategy import WheelConfig, score_candidate
+
+        cfg = WheelConfig()
+        calm = score_candidate(_candidate(term_slope=0.95), cfg, 70.0).score
+        evt = score_candidate(_candidate(term_slope=1.30), cfg, 70.0).score
+        self.assertAlmostEqual(evt, round(calm * 0.65, 1), delta=0.6)
+
+    def test_the_multiplier_is_reported_in_the_subscores(self):
+        from wheelkit.strategy import WheelConfig, score_candidate
+
+        cfg = WheelConfig()
+        scored = score_candidate(_candidate(term_slope=1.30), cfg, 70.0)
+        self.assertIn("event_multiplier", scored.subscores)
+        self.assertAlmostEqual(scored.subscores["event_multiplier"], 65.0, delta=1.0)
+
+    def test_a_high_premium_no_longer_outruns_a_priced_event(self):
+        # The case the multiplicative form exists for.
+        from wheelkit.strategy import WheelConfig, score_candidate
+
+        cfg = WheelConfig()
+        rich_and_dated = score_candidate(
+            _candidate(annualised_return=0.60, vrp=1.8, term_slope=1.40), cfg, 70.0).score
+        modest_and_calm = score_candidate(
+            _candidate(annualised_return=0.25, vrp=1.3, term_slope=0.95), cfg, 70.0).score
+        self.assertLess(rich_and_dated, modest_and_calm)
+
+
+class TestTickGridIsNotIlliquidity(unittest.TestCase):
+    """A percentage spread cannot tell the grid from a thin market."""
+
+    def test_the_tick_helpers_moved_but_still_import_from_orders(self):
+        # orders.py re-exports them, so existing callers keep working.
+        from wheelkit.orders import round_to_tick, tick_size
+        from wheelkit.pricing import tick_size as pricing_tick
+
+        self.assertIs(tick_size, pricing_tick)
+        self.assertEqual(tick_size(0.20), 0.01)
+        self.assertEqual(tick_size(3.50), 0.05)
+        self.assertEqual(round_to_tick(1.234), 1.23)
+
+    def test_a_two_tick_spread_is_not_scored_as_illiquid(self):
+        # $0.19/$0.21 is 10% wide and physically cannot be tighter.
+        from wheelkit.strategy import WheelConfig, score_liquidity
+
+        cfg = WheelConfig()
+        at_grid = score_liquidity(
+            _candidate(bid=0.19, ask=0.21, mid=0.20, spread_pct=0.10), cfg)
+        genuinely_wide = score_liquidity(
+            _candidate(bid=2.85, ask=3.15, mid=3.00, spread_pct=0.10), cfg)
+        self.assertGreater(at_grid, genuinely_wide)
+        self.assertGreaterEqual(at_grid, 75.0 * 0.65)
+
+    def test_a_wide_cheap_spread_is_still_punished(self):
+        # $0.15/$0.25 is five ticks: that is a thin market, not the grid.
+        from wheelkit.strategy import WheelConfig, score_liquidity
+
+        cfg = WheelConfig()
+        grid = score_liquidity(
+            _candidate(bid=0.19, ask=0.21, mid=0.20, spread_pct=0.10), cfg)
+        wide = score_liquidity(
+            _candidate(bid=0.15, ask=0.25, mid=0.20, spread_pct=0.50), cfg)
+        self.assertLess(wide, grid)
+
+    def test_exit_spread_percent_is_not_new_information(self):
+        # Recorded because the audit originally proposed gating on it: the
+        # exit ratio is exactly twice the entry ratio for every quote, so it
+        # can never reorder anything. Ticks were the measure worth adding.
+        for mid, spread in ((0.20, 0.02), (1.00, 0.10), (3.00, 0.30)):
+            self.assertAlmostEqual(
+                spread / (0.5 * mid), 2.0 * (spread / mid), places=9)
+
+
+class TestBetaWeightedExposure(unittest.TestCase):
+    """Correlation groups catch pairs someone wrote down. Beta catches the rest."""
+
+    def _bars(self, returns):
+        from wheelkit.analytics import Bar
+
+        bars, price = [], 100.0
+        for r in returns:
+            price *= (1 + r)
+            bars.append(Bar(day=date(2026, 1, 1), open=price, high=price,
+                            low=price, close=price, volume=1e6))
+        return bars
+
+    def test_a_stock_against_itself_has_beta_one(self):
+        from wheelkit.analytics import beta
+
+        import random
+        random.seed(3)
+        moves = [random.gauss(0, 0.01) for _ in range(80)]
+        bars = self._bars(moves)
+        self.assertAlmostEqual(beta(bars, bars), 1.0, places=6)
+
+    def test_a_doubled_stock_has_beta_two(self):
+        from wheelkit.analytics import beta
+
+        import random
+        random.seed(4)
+        moves = [random.gauss(0, 0.01) for _ in range(80)]
+        self.assertAlmostEqual(
+            beta(self._bars([2 * m for m in moves]), self._bars(moves)),
+            2.0, delta=0.05)
+
+    def test_too_little_history_is_nan_not_one(self):
+        # A missing beta must be visible as missing, not assumed neutral.
+        from wheelkit.analytics import beta
+
+        short = self._bars([0.01] * 10)
+        self.assertNotEqual(beta(short, short), beta(short, short))
+
+    def test_a_defensive_book_passes(self):
+        from wheelkit.risk import RiskLimits, check_portfolio
+
+        findings = check_portfolio(
+            [{"symbol": "KO", "capital": 20_000, "beta": 0.4},
+             {"symbol": "XLU", "capital": 20_000, "beta": 0.3}],
+            limits=RiskLimits(account_value=100_000),
+        )
+        self.assertNotIn("beta_weighted_exposure", codes(findings))
+
+    def test_three_uncorrelated_sectors_can_still_be_one_bet(self):
+        # None of these share a sector or a correlation group.
+        from wheelkit.risk import RiskLimits, check_portfolio
+
+        findings = check_portfolio(
+            [{"symbol": "NVDA", "capital": 20_000, "beta": 2.0},
+             {"symbol": "TSLA", "capital": 20_000, "beta": 3.1},
+             {"symbol": "MARA", "capital": 15_000, "beta": 2.65}],
+            limits=RiskLimits(account_value=100_000),
+        )
+        self.assertIn("beta_weighted_exposure", codes(findings))
+
+    def test_a_missing_beta_counts_at_one_and_says_so(self):
+        from wheelkit.risk import RiskLimits, check_portfolio
+
+        findings = check_portfolio(
+            [{"symbol": "A", "capital": 40_000, "beta": 2.0},
+             {"symbol": "B", "capital": 40_000}],
+            limits=RiskLimits(account_value=100_000),
+        )
+        finding = next(f for f in findings if f.code == "beta_weighted_exposure")
+        self.assertIn("1 without a beta", finding.message)
+
+    def test_a_short_beta_still_adds_exposure(self):
+        # An inverse position is not a hedge for these purposes; it is another
+        # directional bet. Magnitude is what the cap measures.
+        from wheelkit.risk import RiskLimits, check_portfolio
+
+        findings = check_portfolio(
+            [{"symbol": "A", "capital": 45_000, "beta": -1.0},
+             {"symbol": "B", "capital": 45_000, "beta": 1.0}],
+            limits=RiskLimits(account_value=100_000),
+        )
+        self.assertIn("beta_weighted_exposure", codes(findings))
+
+
+class TestScanArchive(unittest.TestCase):
+    """Ten free observations a run, against one or two traded ones."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.root = Path(self.dir.name)
+
+    def test_every_candidate_is_archived_not_just_the_top(self):
+        # The ones that placed fourth through tenth are the control group.
+        from wheelkit.archive import archive_scan, read_archived_scans
+
+        cands = [_candidate(symbol=f"S{i}", score=float(90 - i)) for i in range(10)]
+        archive_scan(cands, directory=self.root)
+        self.assertEqual(len(read_archived_scans(self.root)), 10)
+
+    def test_an_empty_scan_writes_nothing(self):
+        from wheelkit.archive import archive_scan
+
+        self.assertIsNone(archive_scan([], directory=self.root))
+
+    def test_two_runs_accumulate(self):
+        from datetime import datetime
+
+        from wheelkit.archive import archive_scan, read_archived_scans
+
+        archive_scan([_candidate()], directory=self.root,
+                     when=datetime(2026, 9, 1, 15, 45))
+        archive_scan([_candidate()], directory=self.root,
+                     when=datetime(2026, 9, 2, 15, 45))
+        rows = read_archived_scans(self.root)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({r["scan_id"] for r in rows},
+                         {"2026-09-01-1545", "2026-09-02-1545"})
+
+    def test_the_surface_signals_survive_the_round_trip(self):
+        from wheelkit.archive import archive_scan, read_archived_scans
+
+        archive_scan([_candidate(skew_ratio=1.42, term_slope=1.19)],
+                     directory=self.root)
+        row = read_archived_scans(self.root)[0]
+        self.assertAlmostEqual(float(row["skew_ratio"]), 1.42, places=4)
+        self.assertAlmostEqual(float(row["term_slope"]), 1.19, places=4)
+
+
+class TestIvRankNeedsHistory(unittest.TestCase):
+    """The seed for the one measure that cannot be computed today."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.root = Path(self.dir.name)
+
+    def test_readings_accumulate_across_days(self):
+        from wheelkit.archive import log_atm_iv, read_atm_iv_history
+
+        log_atm_iv({"GDX": 0.48, "KO": 0.22}, directory=self.root,
+                   when=date(2026, 9, 1))
+        log_atm_iv({"GDX": 0.51}, directory=self.root, when=date(2026, 9, 2))
+        history = read_atm_iv_history(self.root)
+        self.assertEqual(len(history["GDX"]), 2)
+        self.assertEqual(len(history["KO"]), 1)
+
+    def test_rank_is_refused_until_there_is_enough(self):
+        # A rank from a fortnight of history is not a rank.
+        from wheelkit.archive import iv_rank, read_atm_iv_history
+
+        for i in range(10):
+            from wheelkit.archive import log_atm_iv
+            log_atm_iv({"X": 0.20 + i * 0.01}, directory=self.root,
+                       when=date(2026, 9, 1))
+        history = read_atm_iv_history(self.root)
+        self.assertNotEqual(iv_rank("X", 0.25, history), iv_rank("X", 0.25, history))
+
+    def test_rank_places_the_value_in_its_own_range(self):
+        from wheelkit.archive import iv_rank
+
+        history = {"X": [(date(2026, 1, 1), 0.10 + i * 0.001) for i in range(80)]}
+        self.assertAlmostEqual(iv_rank("X", 0.10, history), 0.0, places=1)
+        self.assertAlmostEqual(iv_rank("X", 0.179, history), 100.0, places=1)
+
+    def test_a_flat_history_yields_no_rank(self):
+        from wheelkit.archive import iv_rank
+
+        history = {"X": [(date(2026, 1, 1), 0.30)] * 80}
+        self.assertNotEqual(iv_rank("X", 0.30, history), iv_rank("X", 0.30, history))

@@ -16,6 +16,7 @@ import sys
 import textwrap
 from pathlib import Path
 
+from wheelkit.archive import DEFAULT_ARCHIVE_DIR, archive_scan, log_atm_iv
 from wheelkit.earnings import EarningsCalendar
 from wheelkit.finviz import fetch_fundamentals, parse_filters
 from wheelkit.engine import run_scan
@@ -109,6 +110,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--allow-sleeve-mismatch", action="store_true",
                    help="Scan anyway when the universe admits stocks the cash "
                         "sleeve cannot secure")
+    p.add_argument("--archive-dir", type=Path, default=DEFAULT_ARCHIVE_DIR,
+                   help="Where scans and the IV history are kept, so the "
+                        "screen can be evaluated later")
+    p.add_argument("--no-archive", action="store_true",
+                   help="Do not record this run")
     p.add_argument("--quiet", action="store_true")
     return p.parse_args()
 
@@ -311,7 +317,7 @@ def main() -> int:
         offline=args.offline_earnings,
     )
 
-    candidates, rejects, skipped, context = run_scan(
+    candidates, rejects, skipped, context, atm_readings = run_scan(
         provider, symbols, cfg, earnings,
         right=right, positions=positions, fundamentals=fundamentals,
         verbose=not args.quiet,
@@ -328,6 +334,15 @@ def main() -> int:
 
     write_csv(args.output, candidates)
     print(f"\nSaved {len(candidates)} row(s) to {args.output.resolve()}")
+
+    if not args.no_archive:
+        archived = archive_scan(candidates, directory=args.archive_dir)
+        logged = log_atm_iv(atm_readings, directory=args.archive_dir)
+        if archived:
+            print(f"Archived {len(candidates)} candidate(s) to {archived}")
+        if logged:
+            print(f"Logged {len(atm_readings)} at-the-money IV reading(s) "
+                  f"for the IV-rank history")
     print("No order was placed. Re-check the bid/ask in your broker before selling.")
 
     if getattr(provider, "close", None):

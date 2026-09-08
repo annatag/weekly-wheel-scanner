@@ -8,26 +8,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 
+from .pricing import PENNY_THRESHOLD, round_to_tick, tick_size  # noqa: F401
 from .strategy import Candidate
 from .tradingdays import deadline_for_dte
-
-# US option quoting increments: a penny below $3.00, a nickel at or above it.
-# Rounding to the wrong increment produces a limit the exchange will reject.
-PENNY_THRESHOLD = 3.00
-
-
-def tick_size(price: float) -> float:
-    return 0.01 if price < PENNY_THRESHOLD else 0.05
-
-
-def round_to_tick(price: float, mode: str = "nearest") -> float:
-    tick = Decimal(str(tick_size(price)))
-    value = Decimal(str(max(price, 0.0)))
-    rounding = ROUND_DOWN if mode == "down" else ROUND_HALF_UP
-    return float((value / tick).quantize(Decimal("1"), rounding=rounding) * tick)
-
 
 @dataclass(frozen=True)
 class LimitPlan:

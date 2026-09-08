@@ -74,6 +74,12 @@ class RiskLimits:
     # bet on the gold price.
     max_positions_per_group: int = 2
     max_group_capital_pct: float = 0.20
+    # Correlation groups only catch pairs someone wrote down. Beta catches the
+    # exposure nobody labelled: three positions in three unrelated sectors,
+    # each with a beta near 2, is one leveraged bet on the index. Capital says
+    # they are diverse; beta-weighted capital says otherwise. Set above
+    # max_total_capital_pct so it binds on leverage, not on size.
+    max_beta_weighted_pct: float = 0.75
 
     # --- while open ---------------------------------------------------
     alert_delta: float = 0.50
@@ -367,7 +373,45 @@ def check_portfolio(
             ))
 
     out.extend(_correlation_findings(book, limits))
+    out.extend(_beta_findings(book, limits))
     return _sort(out)
+
+
+def _beta_findings(book: list[dict], limits: RiskLimits) -> list[Finding]:
+    """Exposure re-expressed in index-equivalent terms.
+
+    Positions without a beta are counted at their face capital rather than
+    skipped, so an unmeasurable name cannot quietly shrink the total. The
+    finding says how many were assumed.
+    """
+    if limits.account_value <= 0:
+        return []
+
+    weighted = 0.0
+    assumed = 0
+    for position in book:
+        capital = float(position.get("capital", 0.0) or 0.0)
+        value = position.get("beta")
+        try:
+            factor = float(value)
+        except (TypeError, ValueError):
+            factor = float("nan")
+        if factor != factor:
+            factor = 1.0
+            assumed += 1
+        weighted += capital * abs(factor)
+
+    pct = weighted / limits.account_value
+    if pct <= limits.max_beta_weighted_pct:
+        return []
+
+    note = f" ({assumed} without a beta, counted at 1.0)" if assumed else ""
+    return [Finding(
+        WARN, "beta_weighted_exposure",
+        f"${weighted:,.0f} of index-equivalent exposure is {pct:.0%} of the "
+        f"account, above the {limits.max_beta_weighted_pct:.0%} limit{note} - "
+        f"the book is more concentrated on the market than its capital suggests",
+    )]
 
 
 def _correlation_findings(book: list[dict], limits: RiskLimits) -> list[Finding]:

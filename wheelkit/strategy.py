@@ -21,8 +21,9 @@ from __future__ import annotations
 import math
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 
+from .volsurface import atm_iv, skew_ratio
 from .analytics import (
     FALLING_KNIFE,
     PULLBACK,
@@ -30,7 +31,7 @@ from .analytics import (
     setup_score,
     variance_risk_premium,
 )
-from .pricing import compute_greeks, expected_move, implied_vol
+from .pricing import compute_greeks, expected_move, implied_vol, tick_size
 from .providers import Quote
 
 DAYS_PER_YEAR = 365.0
@@ -68,6 +69,12 @@ class WheelConfig:
     # not report it, and gating on a field that is always None rejects
     # everything.
     max_spread_pct: float = 0.12
+    # A percentage spread cannot tell the tick grid from illiquidity. A $0.20
+    # contract quoted 0.19/0.21 is 10% wide and physically cannot be tighter;
+    # a $3.00 contract at 10% is six nickels wide and genuinely thin. Judging
+    # both by percentage penalises cheap options for the grid they trade on -
+    # the same bias the dollar credit floor had.
+    tolerated_spread_ticks: int = 2
     min_option_volume: float = 5
     min_quote_size: float = 1
     # The credit floor is relative, not absolute. A flat $0.15 is the one gate
@@ -108,8 +115,19 @@ class WheelConfig:
     min_annualised_return: float = 0.12
 
     # Event risk.
+    # Front-month implied volatility above a later expiry's is the signature
+    # of a dated catalyst, including the ones no earnings feed lists. Costs
+    # one extra chain request per symbol that produced candidates, which is a
+    # small fraction of symbols scanned.
+    check_term_structure: bool = True
+    term_back_dte: int = 45
     skip_earnings: bool = True
-    earnings_buffer_days: int = 1
+    # Days of padding either side of the expiry. Confirmed dates move, and
+    # unconfirmed ones move further; one day did not cover a report that
+    # slipped by 24 hours into the contract's life. The window is symmetric
+    # because IV crush hurts a seller who holds through a report just after
+    # expiry too - the premium was priced for an event you did not capture.
+    earnings_buffer_days: int = 3
 
     risk_free_rate: float = 0.04
     top_n: int = 5
@@ -176,6 +194,12 @@ class Candidate:
     setup: str = "unknown"
     move_quarter: float = float("nan")
     move_month: float = float("nan")
+    # Both were computed in compute_stats and never reached scoring.
+    rv_percentile: float = float("nan")
+    max_drawdown_60d: float = float("nan")
+    gap_down_p05: float = float("nan")
+    skew_ratio: float = float("nan")   # strike IV over at-the-money IV
+    term_slope: float = float("nan")   # front ATM IV over a later expiry's
     pe: float | None = None
     peg: float | None = None
 
@@ -194,6 +218,30 @@ def _interpolate(x: float, points: list[tuple[float, float]]) -> float:
             span = x1 - x0
             return y0 if span <= 0 else y0 + (y1 - y0) * (x - x0) / span
     return points[-1][1]
+
+
+def score_setup(candidate: Candidate) -> float:
+    """Trend classification, corrected for how far the stock has already fallen.
+
+    The classifier reads a quarter and a month. That is enough to separate a
+    dip inside an uptrend from a name in free fall, and not enough to notice
+    that a "pullback" on a stock 30% below its 60-day high is a downtrend with
+    one good month in it. The drawdown is the missing context, and it was
+    already being computed and thrown away.
+
+    Applied to pullback and rebound only. Momentum sits near its highs by
+    definition, and a falling knife never reaches scoring.
+    """
+    base = setup_score(candidate.setup)
+    drawdown = candidate.max_drawdown_60d
+    if drawdown != drawdown or candidate.setup not in ("pullback", "rebound"):
+        return base
+
+    # drawdown is negative: -0.30 means 30% below the 60-day peak.
+    return base * _interpolate(
+        abs(min(drawdown, 0.0)),
+        [(0.10, 1.0), (0.20, 0.85), (0.30, 0.62), (0.45, 0.35)],
+    )
 
 
 def score_premium(candidate: Candidate, cfg: WheelConfig) -> float:
@@ -226,6 +274,28 @@ def score_iv_edge(candidate: Candidate) -> float:
     )
     if vrp > 2.5:
         base *= 0.75
+
+    # VRP divides implied by *trailing* realised. When realised volatility is
+    # unusually quiet for this name the denominator is small for reasons that
+    # tend not to last, and the ratio reads as edge when it is really a low
+    # base. rv_percentile locates the current regime in the stock's own
+    # one-year history, and was also computed and discarded. Only the low end
+    # is adjusted - a high realised percentile makes VRP conservative, which
+    # needs no correction.
+    percentile = candidate.rv_percentile
+    if percentile == percentile and percentile < 25.0:
+        base *= _interpolate(percentile, [(0.0, 0.80), (25.0, 1.0)])
+
+    # Skew separates two things VRP cannot. A contract can be rich against
+    # realised because the whole surface is rich - which is harvestable - or
+    # because this particular strike sits on a steep wing, which means the
+    # market is paying specifically for the tail you are selling. Ordinary
+    # equity skew runs about 1.05-1.15, so only what is clearly beyond that
+    # is discounted.
+    skew = candidate.skew_ratio
+    if skew == skew and skew > 1.15:
+        base *= _interpolate(skew, [(1.15, 1.0), (1.35, 0.85), (1.70, 0.65)])
+
     return min(100.0, base)
 
 
@@ -235,6 +305,13 @@ def score_liquidity(candidate: Candidate, cfg: WheelConfig) -> float:
         [(0.01, 100.0), (0.03, 85.0), (0.06, 60.0), (cfg.max_spread_pct, 25.0),
          (cfg.max_spread_pct * 1.5, 0.0)],
     )
+    # Do not punish a contract for the tick grid it trades on. At or inside
+    # the tolerated tick count the quote is as tight as the exchange permits,
+    # whatever that works out to as a percentage.
+    width = candidate.ask - candidate.bid
+    ticks = width / tick_size(candidate.mid) if candidate.mid > 0 else 99.0
+    if ticks <= cfg.tolerated_spread_ticks:
+        spread = max(spread, 75.0)
     volume = _interpolate(
         candidate.option_volume, [(0.0, 0.0), (25.0, 45.0), (200.0, 80.0), (1000.0, 100.0)]
     )
@@ -266,14 +343,42 @@ def score_safety(candidate: Candidate, cfg: WheelConfig) -> float:
     # comfortable with a flat one, so the trend term is halved for calls.
     trend = candidate.trend_score if candidate.right == "P" else 50.0 + (candidate.trend_score - 50.0) * 0.5
 
-    # Being near the ideal delta is itself a safety property.
-    delta_fit = _interpolate(
-        abs(abs(candidate.delta) - cfg.ideal_abs_delta),
-        [(0.0, 100.0), (0.05, 80.0), (0.10, 55.0), (0.20, 20.0)],
-    )
+    # Delta used to enter here as a third input. It is very nearly the same
+    # number as the cushion: measured across a live scan,
+    # corr(delta, cushion_sigmas) = +0.99 and corr(delta, prob_itm) = -0.97,
+    # because all three are transforms of moneyness over sigma-root-t. Scoring
+    # them together made "safety" three quarters one variable while presenting
+    # itself as a blend. Cushion is the one kept: it already accounts for
+    # volatility and time, and the delta band is enforced as a hard gate
+    # anyway, so nothing is lost by dropping the softer version of it.
+    # Cushion is measured in standard deviations of a diffusion the stock may
+    # not follow. Assignment on a short put usually arrives as a gap, and two
+    # names with the same cushion_sigmas can gap very differently: measured
+    # live, HOOD realises 55% volatility and KO 14%, yet HOOD's fifth-
+    # percentile overnight gap is -3.5% against KO's -0.7% - a five-fold
+    # difference in the thing that actually causes assignment, and only a
+    # four-fold difference in the volatility the cushion is built from.
+    #
+    # So the cushion is discounted by how many bad opens it can absorb.
+    cushion *= _gap_adequacy(candidate)
 
-    return max(
-        0.0, min(100.0, 0.50 * cushion + 0.25 * trend + 0.25 * delta_fit + structural)
+    return max(0.0, min(100.0, 0.65 * cushion + 0.35 * trend + structural))
+
+
+def _gap_adequacy(candidate: Candidate) -> float:
+    """How many typical bad opens the breakeven can absorb, as a 0.5-1.0 scale.
+
+    Unknown gap history returns 1.0 rather than a penalty: a name with too
+    little price history to measure should not be punished for the gap in the
+    data, only for gaps in the price.
+    """
+    gap = candidate.gap_down_p05
+    cushion_pct = candidate.cushion_pct
+    if gap != gap or gap >= 0 or cushion_pct != cushion_pct or cushion_pct <= 0:
+        return 1.0
+    return _interpolate(
+        cushion_pct / abs(gap),
+        [(1.0, 0.50), (1.5, 0.62), (3.0, 0.82), (5.0, 0.95), (8.0, 1.0)],
     )
 
 
@@ -290,17 +395,42 @@ def score_candidate(candidate: Candidate, cfg: WheelConfig, regime: float) -> Ca
         "premium": score_premium(candidate, cfg),
         "iv_edge": score_iv_edge(candidate),
         "safety": score_safety(candidate, cfg),
-        "setup": setup_score(candidate.setup),
+        "setup": score_setup(candidate),
         "liquidity": score_liquidity(candidate, cfg),
         "quality": score_quality(candidate),
         "regime": regime,
     }
     total_weight = sum(cfg.weights.values()) or 1.0
+    blended = sum(subscores[k] * w for k, w in cfg.weights.items()) / total_weight
+
+    # Event risk multiplies rather than averages. A weighted mean lets a
+    # superb premium score carry a candidate that is priced for a catalyst,
+    # which is exactly backwards: premium selling is a business of avoiding
+    # disasters, not of maximising averages. A multiplier can veto; a 4% term
+    # cannot.
+    event = event_multiplier(candidate)
+    subscores["event_multiplier"] = round(event * 100.0, 1)
+
     candidate.subscores = subscores
-    candidate.score = round(
-        sum(subscores[k] * w for k, w in cfg.weights.items()) / total_weight, 1
-    )
+    candidate.score = round(blended * event, 1)
     return candidate
+
+
+def event_multiplier(candidate: Candidate) -> float:
+    """0.55-1.00 from the term structure. Unknown slope is not penalised.
+
+    Front-month implied volatility above a later expiry's means the market has
+    priced something into this contract's life and not the next one. That is
+    the only reading available here that can see an unlisted catalyst - a
+    court date, an FDA decision, a deal vote - which is precisely the risk the
+    earnings calendar was never going to cover.
+    """
+    slope = candidate.term_slope
+    if slope != slope:
+        return 1.0
+    return _interpolate(
+        slope, [(1.05, 1.0), (1.15, 0.85), (1.30, 0.65), (1.50, 0.55)]
+    )
 
 
 def size_position(strike: float, cfg: WheelConfig) -> tuple[int, float] | None:
@@ -359,6 +489,12 @@ def build_candidates(
     results: list[Candidate] = []
     spot = stats.spot
 
+    # One at-the-money reference per expiry, computed before the loop so every
+    # strike in that expiry is measured against the same denominator.
+    atm_by_expiry = atm_iv(
+        [q for q in quotes if q.right == right], spot, today, cfg.risk_free_rate
+    )
+
     for quote in quotes:
         if quote.right != right:
             continue
@@ -372,8 +508,9 @@ def build_candidates(
             rejects["no two-sided quote"] += 1
             continue
         if quote.spread_pct > cfg.max_spread_pct:
-            rejects["spread too wide"] += 1
-            continue
+            if quote.spread > cfg.tolerated_spread_ticks * tick_size(quote.mid) + 1e-9:
+                rejects["spread too wide"] += 1
+                continue
         if quote.mid < cfg.min_credit_per_share:
             rejects["credit below the tick floor"] += 1
             continue
@@ -388,8 +525,11 @@ def build_candidates(
             continue
 
         if earnings_date is not None and cfg.skip_earnings:
-            cutoff = quote.expiration
-            if today <= earnings_date <= cutoff:
+            # The buffer was configured and never applied: the window ran to
+            # the expiry exactly, so a date that moved by a day landed inside
+            # a position already sold.
+            buffer = timedelta(days=max(cfg.earnings_buffer_days, 0))
+            if today - buffer <= earnings_date <= quote.expiration + buffer:
                 rejects["earnings before expiry"] += 1
                 continue
 
@@ -407,8 +547,15 @@ def build_candidates(
         if greeks is None:
             rejects["greeks unavailable"] += 1
             continue
-        if not cfg.min_abs_delta <= abs(greeks.delta) <= cfg.max_abs_delta:
-            rejects["delta outside band"] += 1
+        if abs(greeks.delta) > cfg.max_abs_delta:
+            # Includes the near-the-money strikes fetched only as a skew
+            # reference, which is why this is counted apart from the band's
+            # far edge - lumping them together made the delta gate look far
+            # busier than it is.
+            rejects["delta above the band (incl. ATM reference)"] += 1
+            continue
+        if abs(greeks.delta) < cfg.min_abs_delta:
+            rejects["delta below the band"] += 1
             continue
 
         vrp = variance_risk_premium(iv, stats.rv20, stats.rv60)
@@ -485,6 +632,10 @@ def build_candidates(
                 earnings_date=earnings_date,
                 quote_age_note=_quote_age_note(quote, market_open),
                 setup=stats.setup,
+                skew_ratio=skew_ratio(iv, atm_by_expiry.get(quote.expiration, float("nan"))),
+                rv_percentile=stats.rv_percentile,
+                max_drawdown_60d=stats.max_drawdown_60d,
+                gap_down_p05=stats.gap_down_p05,
                 move_quarter=stats.move_quarter,
                 move_month=stats.move_20d,
                 pe=(fundamentals or {}).get("pe"),
