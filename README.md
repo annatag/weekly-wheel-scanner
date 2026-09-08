@@ -488,13 +488,13 @@ without running anything.
 | Cash per position | $3,000 – $22,000 | `--min-cash` / `--max-cash` |
 | Days to expiry | 7 – 21 | `--min-dte` / `--max-dte` |
 | Delta band | 0.10 – 0.22 | `--min-delta` / `--max-delta` |
-| Bid/ask spread | ≤ 12% | `--max-spread-pct` |
+| Bid/ask spread | ≤ 12%, **or ≤ 2 ticks** | `--max-spread-pct` |
 | Credit | ≥ 0.3% of the strike, and ≥ $0.05 | `--min-credit-pct` |
 | Implied ÷ realised vol | ≥ 1.0 | `--min-vrp` |
 | Annualised return | ≥ 12% | `--min-annualised` |
 | Dollar volume | ≥ $50M/day | `--min-dollar-volume` |
 | Universe size | top 400 by liquidity | `build_universe.py --max-symbols` |
-| Earnings before expiry | excluded | `--allow-earnings` |
+| Earnings | excluded **within ±3 days of expiry** | `--allow-earnings` |
 | Down on the quarter *and* the month | excluded | `--allow-falling-knife` |
 
 **`--max-price` × 100 = `--max-cash`.** One contract secures 100 shares, so
@@ -646,6 +646,28 @@ Buckets thinner than `--min-sample` are marked `(thin)` rather than quietly
 reported, and the score comparison refuses to draw a conclusion below twice
 that. Nothing here changes what the live scan recommends.
 
+#### When to read what
+
+The archive is useless the day you start it and informative on a schedule.
+Nothing here is worth acting on early.
+
+| When | Look at | What would falsify something |
+|---|---|---|
+| weekly | `resolve` | Nothing. It accumulates. |
+| ~3 weeks | first `report` | Read the counts, not the percentages. |
+| ~3 months | assignment rate by delta | If 0.20-delta puts do not assign near 20%, the cushion is still lying and the gap discount is not enough. |
+| ~3 months | IV rank comes online | 60 sessions of ATM history — the one measure the toolkit still cannot compute. |
+| ~6 months | score halves | If the top half does not beat the bottom half, the weights are decoration and should be simplified rather than tuned. |
+
+**Do not change the scoring while this accumulates.** Ten changes landed at
+once in the last round; an eleventh before the first report makes all eleven
+unattributable. And be realistic about what it can prove: ten ranked
+candidates a run instead of one traded is roughly a tenfold rise in
+observations, which turns "years" into "months" for coarse questions like
+delta calibration. It will never make a two-point difference in win rate
+visible on a three-position book. Expect the archive to falsify big errors,
+not to tune weights.
+
 `archive/atm_iv.csv` accumulates one at-the-money reading per symbol per day —
 including symbols that produced no candidate, since IV rank needs the whole
 distribution. That is the seed for the only measure this toolkit cannot
@@ -728,16 +750,79 @@ which is a losing trade however tempting the headline yield looks.
 
 ## How candidates are scored
 
+A weighted blend, then **multiplied** by an event penalty:
+
+```
+score = blended × event_multiplier        # 0.55 … 1.00
+```
+
 | Weight | Component | What it measures |
 |--------|-----------|------------------|
-| 25% | Premium | Annualised return **in excess of the risk-free rate** |
-| 25% | IV edge | Variance risk premium (implied ÷ realised) |
-| 20% | Safety | Cushion in σ, trend, distance from the ideal delta |
-| 15% | Liquidity | Bid/ask spread, quote size, option volume |
-| 10% | Quality | Average dollar volume, log-scaled |
-| 5%  | Regime | SPY volatility and trend |
+| 22% | Premium | Annualised return **in excess of the risk-free rate**, with diminishing returns |
+| 22% | IV edge | Variance risk premium, discounted for skew, quiet realised vol, and extreme VRP |
+| 18% | Safety | Cushion in σ (scaled by gap history) and trend, plus a support bonus |
+| 14% | Setup | Quarter/month trend, scaled down by the 60-day drawdown |
+| 12% | Liquidity | Bid/ask spread and option volume, floored for quotes at the tick grid |
+| 8%  | Quality | Average dollar volume, log-scaled |
+| 4%  | Regime | SPY volatility and trend |
+| × | Event | Term-structure slope: 1.0 at or below 1.05, falling to 0.55 by 1.50 |
 
 Adjust the weights in `WheelConfig.weights` in `wheelkit/strategy.py`.
+
+**Event risk multiplies rather than averaging.** A flat weighted mean lets a
+superb premium score carry a contract priced for a catalyst, which is backwards
+for a strategy whose job is avoiding disasters. A 4% additive term could never
+veto; a 0.55 multiplier can.
+
+### The three discounts inside IV edge
+
+VRP asks whether the option is rich against what the stock has been doing. Three
+things can make that reading a lie, and each scales the term rather than getting
+its own weight — they qualify the same claim, so they should not each get a vote.
+
+| Discount | When | Why |
+|---|---|---|
+| ×0.75 | VRP above 2.5 | On a short-dated contract that usually means a priced event, not edge |
+| → ×0.80 | Realised vol below its own 25th percentile | The denominator is small for reasons that rarely last, so the ratio flatters |
+| → ×0.65 | Skew above 1.15 | Strike IV well above at-the-money means you are paid for the tail, not for edge |
+
+### Skew and term structure
+
+Both read the *shape* of the volatility surface rather than a single quote, and
+neither needs a data subscription.
+
+**Skew** is strike IV ÷ at-the-money IV for the same expiry. Ordinary equity
+skew runs about 1.05–1.15. Well above that, the market is paying specifically
+for downside protection at the strike you are selling. The at-the-money
+reference comes from widening the existing strike request, not a second call.
+
+**Term structure** is front-month ATM IV ÷ a ~45-day expiry's. Above ~1.10 is
+backwardation — the near contract is pricing something the far one is not. It is
+the only measure here that can see a catalyst the earnings feed does not list: a
+court date, an FDA decision, a deal vote. Measured live: NVDA 0.90, KO 0.98,
+MARA 1.03, GDX 1.06.
+
+This one costs a second chain request, so it is spent only on symbols that
+produced candidates. A failed fetch returns no signal rather than no candidate.
+
+### Cushion is discounted by gap history
+
+Cushion in standard deviations assumes the price diffuses continuously.
+Assignment on a short put almost never arrives that way — it arrives overnight,
+and gap risk is genuinely separate from the volatility the cushion is built
+from:
+
+| | realised vol | 5th-percentile overnight gap |
+|---|---|---|
+| KO | 14% | −0.70% |
+| NVDA | 27% | −2.03% |
+| GDX | 28% | −3.65% |
+| HOOD | 55% | −3.50% |
+
+HOOD realises twice GDX's volatility and gaps the same distance. Two contracts
+with an identical `cushion_sigmas` are not carrying the same assignment risk, so
+the cushion is scaled by how many typical bad opens the breakeven absorbs — a
+cushion thinner than one bad open is halved, eight deep is untouched.
 
 ## What changed from version 1, and why
 
