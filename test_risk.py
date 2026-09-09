@@ -2360,3 +2360,104 @@ class TestCollateralIsWhatItSaysItIs(unittest.TestCase):
         margin = [f for f in findings if f.code == "margin_secured"]
         self.assertTrue(margin)
         self.assertNotEqual(margin[0].level, URGENT)
+
+
+class TestFillDrop(unittest.TestCase):
+    """close records how a trade ended; drop corrects the log."""
+
+    def setUp(self):
+        import argparse
+        import contextlib
+        import io
+
+        import wheel_fills
+
+        self.cli = wheel_fills
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.path = Path(self.dir.name) / "fills.csv"
+        self._args = argparse.Namespace
+        self._quiet = lambda: contextlib.redirect_stdout(io.StringIO())
+
+    def _record(self, **kw):
+        base = dict(fills_file=self.path, symbol="NVDA", right="P",
+                    expiration="2026-09-18", strike=150.0, contracts=1,
+                    credit=1.10, scan_file=Path("nope.csv"), scan_date=None,
+                    no_scan=True, date=None, note="")
+        base.update(kw)
+        with self._quiet():
+            self.cli.cmd_record(self._args(**base))
+
+    def _drop(self, **kw):
+        base = dict(fills_file=self.path, symbol="NVDA", right="P",
+                    expiration="2026-09-18", strike=150.0,
+                    dry_run=False, all=False)
+        base.update(kw)
+        import contextlib
+        import io
+
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(err):
+            code = self.cli.cmd_drop(self._args(**base))
+        return code, err.getvalue()
+
+    def test_it_removes_the_row(self):
+        from wheelkit.fills import load_fills
+
+        self._record()
+        self.assertEqual(self._drop()[0], 0)
+        self.assertEqual(load_fills(self.path), [])
+
+    def test_a_dry_run_changes_nothing(self):
+        from wheelkit.fills import load_fills
+
+        self._record()
+        self._drop(dry_run=True)
+        self.assertEqual(len(load_fills(self.path)), 1)
+
+    def test_no_match_refuses(self):
+        self._record()
+        code, err = self._drop(strike=99.0)
+        self.assertEqual(code, 2)
+        self.assertIn("No row for", err)
+
+    def test_an_empty_log_refuses(self):
+        code, err = self._drop()
+        self.assertEqual(code, 2)
+        self.assertIn("No fills", err)
+
+    def test_duplicates_refuse_without_all(self):
+        # Removing an unknown number of rows is worse than removing none.
+        from wheelkit.fills import load_fills
+
+        self._record()
+        self._record()
+        code, err = self._drop()
+        self.assertEqual(code, 2)
+        self.assertIn("2 rows match", err)
+        self.assertEqual(len(load_fills(self.path)), 2)
+
+    def test_all_removes_every_match(self):
+        from wheelkit.fills import load_fills
+
+        self._record()
+        self._record()
+        self.assertEqual(self._drop(all=True)[0], 0)
+        self.assertEqual(load_fills(self.path), [])
+
+    def test_it_leaves_a_backup(self):
+        self._record()
+        self._drop()
+        backups = list(Path(self.dir.name).glob("fills.csv.bak-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertIn("NVDA", backups[0].read_text(encoding="utf-8"))
+
+    def test_other_rows_survive(self):
+        from wheelkit.fills import load_fills
+
+        self._record()
+        self._record(symbol="PLTR", strike=160.0, credit=1.41)
+        self._drop()
+        remaining = load_fills(self.path)
+        self.assertEqual([f.symbol for f in remaining], ["PLTR"])
