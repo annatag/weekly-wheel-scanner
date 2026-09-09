@@ -740,7 +740,17 @@ python wheel_fills.py close  GDX P 2026-09-04 95 --debit 0.31
 python wheel_fills.py close  FCX P 2026-09-11 68 --expired
 python wheel_fills.py list
 python wheel_fills.py report
+python wheel_fills.py drop  NVDA P 2026-09-18 150      # a row that should not exist
 ```
+
+`close` and `drop` are different operations. `close` records how a real trade
+ended and keeps it in the record, where it is evidence about the scanner.
+`drop` removes the row as though it had never been entered — for a fill typed
+wrong, an order that never filled, or a trade from a different account. It
+warns when the row it is removing was closed, refuses when more than one row
+matches (`--all` to override), and writes a dated backup before every removal,
+because a confirmation prompt does not survive a mistake made confidently and
+a file does.
 
 `record` looks the contract up in `wheel_scan_results.csv`, copies the
 suggested strike, expiry, limit and score **into the row**, and states how the

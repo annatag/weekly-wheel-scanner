@@ -17,6 +17,7 @@ Nothing here talks to a broker. It writes fills.csv and reads it back.
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from datetime import date
 from pathlib import Path
@@ -75,6 +76,17 @@ def parse_args() -> argparse.Namespace:
     cls.add_argument("--rolled", action="store_true")
     cls.add_argument("--date", help="Close date, YYYY-MM-DD (default: today)")
     cls.add_argument("--note", default="")
+
+    drop = sub.add_parser(
+        "drop", help="Remove a row entirely - for a mistyped or unfilled entry")
+    drop.add_argument("symbol")
+    drop.add_argument("right", choices=("P", "C", "p", "c"))
+    drop.add_argument("expiration", help="YYYY-MM-DD")
+    drop.add_argument("strike", type=float)
+    drop.add_argument("--dry-run", action="store_true",
+                      help="Show what would go and change nothing")
+    drop.add_argument("--all", action="store_true",
+                      help="Remove every match rather than refusing on ambiguity")
 
     sub.add_parser("list", help="Every fill on file")
     rep = sub.add_parser("report", help="How closely fills tracked the scan")
@@ -180,6 +192,66 @@ def cmd_close(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_drop(args: argparse.Namespace) -> int:
+    """Delete a row. For a fill typed wrong, or an order that never filled.
+
+    `close` records how a real trade ended and keeps it in the record; this
+    removes the row as though it had never been entered. The distinction
+    matters for grading - a closed trade is evidence about the scanner, and a
+    dropped one is a correction to the log.
+    """
+    fills = load_fills(args.fills_file)
+    if not fills:
+        print(f"No fills in {args.fills_file}.", file=sys.stderr)
+        return 2
+
+    expiration = date.fromisoformat(args.expiration)
+    right = args.right.upper()[:1]
+    matched = [
+        f for f in fills
+        if f.symbol == args.symbol.upper() and f.right == right
+        and f.expiration == expiration and abs(f.strike - args.strike) < 1e-6
+    ]
+    if not matched:
+        print(f"No row for {args.symbol.upper()} ${args.strike:g}{right} "
+              f"{expiration}. Run 'list' to see what is on file.",
+              file=sys.stderr)
+        return 2
+    if len(matched) > 1 and not args.all:
+        print(f"{len(matched)} rows match that contract - the same one was "
+              f"entered more than once. Pass --all to remove them, or edit "
+              f"{args.fills_file} by hand to keep one.", file=sys.stderr)
+        return 2
+
+    for fill in matched:
+        status = fill.outcome or "open"
+        realised = "" if fill.realised != fill.realised else \
+            f", realised ${fill.realised:+,.0f}"
+        print(f"Removing {fill.symbol} ${fill.strike:g}{fill.right} "
+              f"{fill.expiration:%b %d} entered {fill.recorded_at} "
+              f"at ${fill.fill_credit:.2f} ({status}{realised})")
+        if fill.outcome:
+            print("  This one was closed, so it was evidence about the "
+                  "scanner. Dropping it removes that, which is not the same "
+                  "as recording a loss.")
+
+    if args.dry_run:
+        print("\nDry run - nothing removed.")
+        return 0
+
+    # A backup before every destructive write. Confirmation prompts do not
+    # survive a mistake made confidently; a file does.
+    backup = args.fills_file.with_name(
+        f"{args.fills_file.name}.bak-{date.today().isoformat()}")
+    shutil.copy2(args.fills_file, backup)
+
+    keep = [f for f in fills if f not in matched]
+    save_fills(keep, args.fills_file)
+    print(f"\n{len(fills)} row(s) -> {len(keep)}. Previous file kept at "
+          f"{backup.name}")
+    return 0
+
+
 def cmd_list(args: argparse.Namespace) -> int:
     fills = load_fills(args.fills_file)
     if not fills:
@@ -251,7 +323,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 def main() -> int:
     args = parse_args()
     return {
-        "record": cmd_record, "close": cmd_close,
+        "record": cmd_record, "close": cmd_close, "drop": cmd_drop,
         "list": cmd_list, "report": cmd_report,
     }[args.command](args)
 
