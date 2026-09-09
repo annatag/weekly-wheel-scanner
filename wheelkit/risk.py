@@ -331,20 +331,30 @@ def check_portfolio(
     if not book:
         return out
 
-    if len(book) > limits.max_open_positions:
+    # Equity held counts toward exposure but is not a "position" in the sense
+    # this limit means. Selling three puts is three decisions; holding shares
+    # from an assignment, or bought outright, is one holding that the caps
+    # below still have to see. Counting it here would make the position limit
+    # fire on a book that has not opened anything.
+    trades = [p for p in book if p.get("kind", "option") != "stock"]
+    if len(trades) > limits.max_open_positions:
         out.append(Finding(
             WARN, "too_many_positions",
-            f"{len(book)} open positions exceeds the "
+            f"{len(trades)} open positions exceeds the "
             f"{limits.max_open_positions} limit",
         ))
 
     total = sum(p.get("capital", 0.0) for p in book)
     pct = total / limits.account_value if limits.account_value else 0.0
     if pct > limits.max_total_capital_pct:
+        equity = sum(
+            p.get("capital", 0.0) for p in book if p.get("kind") == "stock"
+        )
+        note = f", of which ${equity:,.0f} is stock held" if equity else ""
         out.append(Finding(
             WARN, "over_committed",
             f"${total:,.0f} committed is {pct:.0%} of the account, above the "
-            f"{limits.max_total_capital_pct:.0%} limit",
+            f"{limits.max_total_capital_pct:.0%} limit{note}",
         ))
 
     counts: dict[str, int] = {}

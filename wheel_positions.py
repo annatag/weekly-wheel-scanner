@@ -22,7 +22,9 @@ from wheelkit.netio import FetchError
 from wheelkit.notify import NotifyConfig, dispatch
 from wheelkit.positions import (
     DEFAULT_POSITIONS_FILE,
+    DEFAULT_SHARES_FILE,
     load_account_value,
+    load_shares,
     SourceReport,
     OpenOption,
     enrich,
@@ -78,6 +80,8 @@ def parse_args() -> argparse.Namespace:
                    help="Do not send an ntfy push")
     p.add_argument("--notify-test", action="store_true",
                    help="Send a test notification through every channel and exit")
+    p.add_argument("--shares-file", type=Path, default=DEFAULT_SHARES_FILE,
+                   help="Fallback list of stock held, when no broker answers")
     p.add_argument("--earnings-file", type=Path, default=Path("earnings.csv"))
     p.add_argument("--offline-earnings", action="store_true")
     p.add_argument("--fills-file", type=Path, default=DEFAULT_FILLS_FILE,
@@ -272,6 +276,36 @@ def run_check(args: argparse.Namespace, provider: AlpacaProvider,
     return 1 if blocking else 0
 
 
+def equity_exposure(provider, args: argparse.Namespace) -> list[dict]:
+    """Stock held, valued at the market, for the concentration checks.
+
+    Market value rather than cost basis: the caps ask how much of the account
+    is riding on one name today, and what you paid for it is not that.
+    """
+    try:
+        lots, _ = load_shares(
+            "auto", provider=provider, path=args.shares_file,
+            host=args.host, port=args.port,
+        )
+    except FetchError:
+        return []
+
+    out: list[dict] = []
+    for symbol, lot in sorted(lots.items()):
+        try:
+            spot, _ = provider.spot(symbol)
+        except FetchError:
+            spot = lot.basis  # better than dropping the position entirely
+        if spot != spot or spot <= 0 or lot.shares <= 0:
+            continue
+        out.append({
+            "symbol": symbol,
+            "capital": lot.shares * spot,
+            "kind": "stock",
+        })
+    return out
+
+
 def resolve_account_value(args: argparse.Namespace, provider) -> float:
     """The account size every risk limit is a percentage of.
 
@@ -455,15 +489,17 @@ def main() -> int:
             entry_date=position.entry_date, limits=limits,
         )
 
-    betas = position_betas(provider, {p.symbol for p in positions})
-    portfolio = check_portfolio(
-        [
-            {"symbol": p.symbol, "capital": p.capital,
-             "beta": betas.get(p.symbol, float("nan"))}
-            for p in positions
-        ],
-        limits=limits,
-    )
+    # Equity held is exposure whether or not it came from this strategy. The
+    # concentration caps counted option positions only, so a large holding was
+    # invisible to every one of them - the book could read "1 position, no
+    # alerts" while most of the account sat in a single high-beta stock.
+    equity = equity_exposure(provider, args)
+    book = [{"symbol": p.symbol, "capital": p.capital} for p in positions] + equity
+    betas = position_betas(provider, {entry["symbol"] for entry in book})
+    for entry in book:
+        entry["beta"] = betas.get(entry["symbol"], float("nan"))
+
+    portfolio = check_portfolio(book, limits=limits)
     flagged = [p for p in positions if p.findings]
     everything = [f for p in positions for f in p.findings] + portfolio
     level = worst_level(everything)
