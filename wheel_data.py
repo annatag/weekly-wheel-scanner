@@ -70,6 +70,9 @@ def parse_args() -> argparse.Namespace:
 
     pack = sub.add_parser("pack", help="Bundle the untracked state")
     pack.add_argument("--output", type=Path, help="Target .tgz (default: dated)")
+    pack.add_argument("--output-dir", type=Path,
+                      help="Write a dated bundle into this directory. For a "
+                           "scheduled run, which cannot compose a filename.")
     pack.add_argument("--root", type=Path, default=Path("."))
 
     restore = sub.add_parser("restore", help="Unpack into this checkout")
@@ -163,7 +166,17 @@ def cmd_pack(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
 
-    target = args.output or Path(f"wheelscan-data-{date.today().isoformat()}.tgz")
+    name = f"wheelscan-data-{date.today().isoformat()}.tgz"
+    if args.output:
+        target = args.output
+    elif args.output_dir:
+        # Created rather than required: on a fresh machine the sync folder may
+        # not exist yet, and failing the weekly backup over a missing
+        # directory would be the backup failing for the least good reason.
+        args.output_dir.expanduser().mkdir(parents=True, exist_ok=True)
+        target = args.output_dir.expanduser() / name
+    else:
+        target = Path(name)
     with tarfile.open(target, "w:gz") as bundle:
         for name in present:
             bundle.add(root / name, arcname=name)

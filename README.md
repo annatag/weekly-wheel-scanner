@@ -409,6 +409,7 @@ Installs three jobs, weekdays, in the machine's local time:
 | 15:00 | `positions` | open-position alerts |
 | 15:45 | `scan` | builds the watchlist for tomorrow |
 | 16:15 | `positions` | open-position alerts, marks settled |
+| Fri 17:00 | `backup` | packs the archive into iCloud Drive |
 
 The pairing is the point: **scan late, trade the next morning.** The 15:45 run
 picks contracts off a full day of price action; the 10:30 run re-prices them
@@ -699,8 +700,25 @@ it is gitignored — deliberately, since it is position data.
 
 ```bash
 python wheel_data.py pack                              # → wheelscan-data-2026-09-08.tgz
+python wheel_data.py pack --output-dir ~/somewhere      # dated name, for a scheduler
 python wheel_data.py restore wheelscan-data-2026-09-08.tgz
 ```
+
+`install_schedule.sh` runs this weekly, Fridays at 17:00, writing into
+`~/Library/Mobile Documents/com~apple~CloudDocs/wheelscan-backups/`.
+
+**That path is deliberate.** `~/Documents` does **not** sync to iCloud unless
+"Desktop & Documents Folders" is enabled in iCloud Drive settings — and a
+symlink placed inside the container pointing out at `~/Documents` does not make
+it sync either, because iCloud does not follow symlinks out of its container.
+A backup written there stays on the machine, which is the one thing a backup
+must not do. Writing into the container directly avoids the question.
+
+launchd rather than cron, for the same reason as the other jobs: cron on modern
+macOS needs Full Disk Access granted to `/usr/sbin/cron` and fails silently
+without it. launchd also runs a missed calendar job when the machine next
+wakes, which matters for a weekly slot on a laptop that is usually asleep at
+17:00 on a Friday.
 
 Most of what it carries could be rebuilt. **Two things could not:**
 

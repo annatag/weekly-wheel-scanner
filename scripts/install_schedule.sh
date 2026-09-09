@@ -5,6 +5,7 @@
 #   positions  weekdays 15:00 and 16:15  monitor open positions, alerts only
 #   scan       weekdays 15:45            build tomorrow's watchlist
 #   requote    weekdays 10:30            re-check it before you trade
+#   backup     Fridays 17:00             pack the archive into iCloud Drive
 #
 # The scan runs at 15:45 rather than after the close because the scanner needs
 # live quotes: option spreads blow out once market makers step back, and an
@@ -14,13 +15,14 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AGENTS="$HOME/Library/LaunchAgents"
-JOBS=("com.wheelscan.positions" "com.wheelscan.scan" "com.wheelscan.requote")
+JOBS=("com.wheelscan.positions" "com.wheelscan.scan" "com.wheelscan.requote" "com.wheelscan.backup")
 
 mkdir -p "$REPO/logs" "$AGENTS"
 
 for label in "${JOBS[@]}"; do
     target="$AGENTS/$label.plist"
-    sed "s|__REPO__|$REPO|g" "$REPO/scripts/$label.plist" > "$target"
+    sed -e "s|__REPO__|$REPO|g" -e "s|__HOME__|$HOME|g" \
+        "$REPO/scripts/$label.plist" > "$target"
     launchctl unload "$target" 2>/dev/null || true
     launchctl load "$target"
     echo "Installed $label"
@@ -32,6 +34,10 @@ cat <<EOF
   15:00  positions  open-position alerts
   15:45  scan       builds the watchlist for tomorrow
   16:15  positions  open-position alerts, marks settled
+  Fri 17:00  backup   packs the archive into iCloud Drive
+
+  The backup targets the iCloud container directly. ~/Documents is NOT synced
+  unless "Desktop & Documents Folders" is on in iCloud Drive settings.
 
   Weekdays only, in this machine's local time ($(date +%Z)) - which tracks the
   US market only while the Mac stays on Eastern time.
