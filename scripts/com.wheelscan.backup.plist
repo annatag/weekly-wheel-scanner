@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.wheelscan.backup</string>
+
+  <!-- Absolute paths: launchd runs with a minimal environment and no shell. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>__REPO__/.venv/bin/python</string>
+    <string>__REPO__/wheel_data.py</string>
+    <string>pack</string>
+    <string>--output-dir</string>
+    <!-- The iCloud Drive container itself. ~/Documents is NOT synced unless
+         "Desktop & Documents Folders" is enabled, and a symlink pointing out
+         of the container does not make it so. -->
+    <string>__HOME__/Library/Mobile Documents/com~apple~CloudDocs/wheelscan-backups</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO__</string>
+
+  <!-- Friday after the close: the archive grows on weekdays, so this catches
+       the whole trading week including that day's scan. -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>17</integer><key>Minute</key><integer>0</integer></dict>
+  </array>
+
+  <!-- No RunAtLoad: installing the job should not fire a backup. If the
+       machine is asleep at the scheduled time, launchd runs the job once on
+       wake rather than skipping the week, which is the behaviour a weekly
+       job on a laptop needs and the reason this is not a cron entry. -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>__REPO__/logs/backup.log</string>
+  <key>StandardErrorPath</key>
+  <string>__REPO__/logs/backup.err</string>
+</dict>
+</plist>

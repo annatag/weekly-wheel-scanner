@@ -2461,3 +2461,99 @@ class TestFillDrop(unittest.TestCase):
         self._drop()
         remaining = load_fills(self.path)
         self.assertEqual([f.symbol for f in remaining], ["PLTR"])
+
+
+class TestBackupSchedule(unittest.TestCase):
+    """A weekly job that writes somewhere unsynced is not a backup."""
+
+    PLIST = Path("scripts/com.wheelscan.backup.plist")
+
+    def test_the_plist_parses(self):
+        import plistlib
+
+        raw = self.PLIST.read_text(encoding="utf-8")
+        # Substitute as the installer does, so the parse matches what launchd
+        # is actually handed.
+        raw = raw.replace("__REPO__", "/tmp/repo").replace("__HOME__", "/tmp/home")
+        parsed = plistlib.loads(raw.encode("utf-8"))
+        self.assertEqual(parsed["Label"], "com.wheelscan.backup")
+
+    def test_it_targets_the_icloud_container_not_documents(self):
+        # ~/Documents does not sync unless Desktop & Documents is enabled, and
+        # a symlink into it from the container does not make it sync.
+        raw = self.PLIST.read_text(encoding="utf-8")
+        self.assertIn("com~apple~CloudDocs", raw)
+        self.assertNotIn("<string>__HOME__/Documents", raw)
+
+    def test_it_runs_weekly_not_daily(self):
+        import plistlib
+
+        raw = self.PLIST.read_text(encoding="utf-8")
+        raw = raw.replace("__REPO__", "/tmp/repo").replace("__HOME__", "/tmp/home")
+        schedule = plistlib.loads(raw.encode("utf-8"))["StartCalendarInterval"]
+        self.assertEqual(len(schedule), 1)
+        self.assertEqual(schedule[0]["Weekday"], 5)
+
+    def test_installing_does_not_fire_a_backup(self):
+        import plistlib
+
+        raw = self.PLIST.read_text(encoding="utf-8")
+        raw = raw.replace("__REPO__", "/tmp/repo").replace("__HOME__", "/tmp/home")
+        self.assertFalse(plistlib.loads(raw.encode("utf-8"))["RunAtLoad"])
+
+    def test_the_installer_substitutes_home(self):
+        # __HOME__ is new; an installer that only replaced __REPO__ would
+        # write a literal path launchd cannot resolve.
+        script = Path("scripts/install_schedule.sh").read_text(encoding="utf-8")
+        self.assertIn("__HOME__", script)
+        self.assertIn("com.wheelscan.backup", script)
+
+
+class TestPackOutputDir(unittest.TestCase):
+    """A scheduled run cannot compose a dated filename."""
+
+    def setUp(self):
+        import argparse
+        import contextlib
+        import io
+
+        import wheel_data
+
+        self.wd = wheel_data
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.root = Path(self.dir.name) / "repo"
+        (self.root / "archive" / "scans").mkdir(parents=True)
+        (self.root / "fills.csv").write_text(
+            "recorded_at,symbol,right,expiration,strike,contracts,fill_credit\n"
+            "2026-09-09,PLTR,P,2026-09-18,160,1,1.41\n", encoding="utf-8")
+        self._args = argparse.Namespace
+        self._quiet = lambda: contextlib.redirect_stdout(io.StringIO())
+
+    def test_it_writes_a_dated_name_into_the_directory(self):
+        from datetime import date
+
+        target = Path(self.dir.name) / "sync"
+        with self._quiet():
+            self.wd.cmd_pack(self._args(
+                root=self.root, output=None, output_dir=target))
+        expected = target / f"wheelscan-data-{date.today().isoformat()}.tgz"
+        self.assertTrue(expected.exists())
+
+    def test_a_missing_directory_is_created(self):
+        # On a fresh machine the sync folder may not exist, and the weekly
+        # backup should not fail for that reason.
+        target = Path(self.dir.name) / "not" / "there" / "yet"
+        with self._quiet():
+            self.wd.cmd_pack(self._args(
+                root=self.root, output=None, output_dir=target))
+        self.assertTrue(target.exists())
+
+    def test_an_explicit_output_still_wins(self):
+        target = Path(self.dir.name) / "explicit.tgz"
+        with self._quiet():
+            self.wd.cmd_pack(self._args(
+                root=self.root, output=target,
+                output_dir=Path(self.dir.name) / "ignored"))
+        self.assertTrue(target.exists())
+        self.assertFalse((Path(self.dir.name) / "ignored").exists())
