@@ -2193,3 +2193,57 @@ class TestDataBundle(unittest.TestCase):
         lines = self.wd.describe(self.old)
         self.assertTrue(any("1 row(s)" in l for l in lines))
         self.assertTrue(any("more days to IV rank" in l for l in lines))
+
+
+class TestAccountValueComesFromTheBroker(unittest.TestCase):
+    """Every risk limit is a share of this number, so a guess scales them all."""
+
+    def _args(self, **kw):
+        import argparse
+
+        base = dict(account_value=None, fallback_account_value=100_000.0,
+                    host="127.0.0.1", port=7497, alerts_only=True)
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def test_an_explicit_flag_wins(self):
+        import wheel_positions as wp
+
+        self.assertEqual(
+            wp.resolve_account_value(self._args(account_value=50_000.0), None),
+            50_000.0)
+
+    def test_the_broker_is_preferred_over_the_fallback(self):
+        from unittest.mock import patch
+
+        import wheel_positions as wp
+
+        with patch.object(wp, "load_account_value", return_value=(112_205.58, "ibkr")):
+            self.assertAlmostEqual(
+                wp.resolve_account_value(self._args(), None), 112_205.58)
+
+    def test_an_unreachable_broker_falls_back_and_says_so(self):
+        import contextlib
+        import io
+        from unittest.mock import patch
+
+        import wheel_positions as wp
+
+        err = io.StringIO()
+        with patch.object(wp, "load_account_value",
+                          return_value=(float("nan"), "unavailable")), \
+             contextlib.redirect_stderr(err):
+            value = wp.resolve_account_value(self._args(), None)
+        self.assertEqual(value, 100_000.0)
+        self.assertIn("fallback", err.getvalue())
+
+    def test_a_wrong_account_value_scales_every_limit(self):
+        # The reason this matters: the caps are percentages, so an account
+        # value that is 11% low makes every one of them 11% tight.
+        from wheelkit.risk import RiskLimits, check_portfolio
+
+        book = [{"symbol": "X", "capital": 65_000.0}]
+        guessed = check_portfolio(book, limits=RiskLimits(account_value=100_000))
+        actual = check_portfolio(book, limits=RiskLimits(account_value=112_205))
+        self.assertIn("over_committed", codes(guessed))
+        self.assertNotIn("over_committed", codes(actual))

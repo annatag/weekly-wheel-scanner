@@ -22,6 +22,7 @@ from wheelkit.netio import FetchError
 from wheelkit.notify import NotifyConfig, dispatch
 from wheelkit.positions import (
     DEFAULT_POSITIONS_FILE,
+    load_account_value,
     SourceReport,
     OpenOption,
     enrich,
@@ -55,7 +56,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--positions-file", type=Path, default=DEFAULT_POSITIONS_FILE)
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=7497)
-    p.add_argument("--account-value", type=float, default=100_000.0)
+    p.add_argument("--account-value", type=float, default=None,
+                   help="Override the broker's net liquidation. Left unset, "
+                        "the account size is read from TWS or Alpaca — every "
+                        "risk limit is a share of it, so a guess here makes "
+                        "every limit wrong by the same factor.")
+    p.add_argument("--fallback-account-value", type=float, default=100_000.0,
+                   help="Used only when no broker answers, and stated when it is")
     p.add_argument("--time-stop-dte", type=int, default=21,
                    help="Checkpoint at which a position has to justify itself. "
                         "Resolved back to the nearest trading day.")
@@ -265,6 +272,30 @@ def run_check(args: argparse.Namespace, provider: AlpacaProvider,
     return 1 if blocking else 0
 
 
+def resolve_account_value(args: argparse.Namespace, provider) -> float:
+    """The account size every risk limit is a percentage of.
+
+    Order: an explicit flag, then the broker, then a stated fallback. The
+    fallback announces itself because a limit computed against the wrong
+    account is wrong by exactly that ratio, silently and in every line.
+    """
+    if args.account_value:
+        return args.account_value
+
+    value, source = load_account_value(
+        "auto", provider=provider, host=args.host, port=args.port
+    )
+    if value == value and value > 0:
+        if not args.alerts_only:
+            print(f"Account value ${value:,.0f} from {source}.")
+        return value
+
+    print(f"WARNING: no broker reported an account value; using the "
+          f"${args.fallback_account_value:,.0f} fallback. Every percentage "
+          f"limit below is a share of that guess.", file=sys.stderr)
+    return args.fallback_account_value
+
+
 def position_betas(provider, symbols: set[str]) -> dict[str, float]:
     """60-day beta against SPY for each held name.
 
@@ -349,11 +380,6 @@ def print_attempts(report: SourceReport, *, stream=None) -> None:
 
 def main() -> int:
     args = parse_args()
-    limits = RiskLimits(
-        account_value=args.account_value,
-        time_stop_dte=args.time_stop_dte,
-        time_stop_min_capture=args.time_stop_capture,
-    )
 
     if args.notify_test:
         return run_notify_test(args)
@@ -363,6 +389,12 @@ def main() -> int:
     except FetchError as exc:
         print(f"Could not start Alpaca: {exc}", file=sys.stderr)
         return 2
+
+    limits = RiskLimits(
+        account_value=resolve_account_value(args, provider),
+        time_stop_dte=args.time_stop_dte,
+        time_stop_min_capture=args.time_stop_capture,
+    )
 
     try:
         positions, source_report = load_positions(

@@ -525,6 +525,80 @@ def load_shares(
     return {}, report
 
 
+def account_value_ibkr(
+    host: str = "127.0.0.1", port: int = 7497, client_id: int = 26
+) -> float:
+    """Net liquidation from TWS, or NaN.
+
+    Every risk percentage in the toolkit is a share of the account, and the
+    account size was a flag with a $100,000 default that the scheduled jobs
+    never passed. The broker knows the real figure and is already being
+    connected to; guessing beside it is the same mistake as the hand-typed
+    share basis.
+    """
+    from ib_async import IB
+
+    ib = IB()
+    try:
+        ib.connect(host, port, clientId=client_id, readonly=True, timeout=12)
+    except Exception as exc:
+        raise FetchError(f"Could not reach TWS on {host}:{port} ({exc})") from exc
+    try:
+        for account in ib.managedAccounts():
+            for value in ib.accountValues(account):
+                if value.tag == "NetLiquidation" and value.currency == "USD":
+                    return float(value.value)
+        return float("nan")
+    finally:
+        ib.disconnect()
+
+
+def account_value_alpaca(provider: AlpacaProvider) -> float:
+    from .providers import ALPACA_TRADE_URL
+
+    payload = get_json(f"{ALPACA_TRADE_URL}/v2/account", headers=provider._headers)
+    try:
+        return float((payload or {}).get("equity"))
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def load_account_value(
+    source: str = "auto",
+    *,
+    provider: AlpacaProvider | None = None,
+    host: str = "127.0.0.1",
+    port: int = 7497,
+) -> tuple[float, str]:
+    """The account's net liquidation, and where it came from.
+
+    Returns NaN with a reason when no broker answers, so the caller can fall
+    back to a stated default rather than silently inventing one.
+    """
+    order = ("ibkr", "alpaca") if source == "auto" else (source,)
+    import logging
+
+    ib_logger = logging.getLogger("ib_async")
+    previous = ib_logger.level
+    ib_logger.setLevel(logging.CRITICAL)
+    try:
+        for name in order:
+            try:
+                if name == "ibkr":
+                    value = account_value_ibkr(host, port)
+                elif name == "alpaca" and provider is not None:
+                    value = account_value_alpaca(provider)
+                else:
+                    continue
+            except Exception:
+                continue
+            if value == value and value > 0:
+                return value, name
+    finally:
+        ib_logger.setLevel(previous)
+    return float("nan"), "unavailable"
+
+
 def _short_reason(exc: Exception) -> str:
     """One readable line explaining why a source was unavailable."""
     text = str(exc).split("\n")[0]
