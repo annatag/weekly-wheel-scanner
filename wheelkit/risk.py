@@ -318,6 +318,7 @@ def check_portfolio(
     *,
     proposed: dict | None = None,
     limits: RiskLimits | None = None,
+    cash: float = float("nan"),
 ) -> list[Finding]:
     """Aggregate exposure across everything open, plus an optional new trade.
 
@@ -331,20 +332,30 @@ def check_portfolio(
     if not book:
         return out
 
-    if len(book) > limits.max_open_positions:
+    # Equity held counts toward exposure but is not a "position" in the sense
+    # this limit means. Selling three puts is three decisions; holding shares
+    # from an assignment, or bought outright, is one holding that the caps
+    # below still have to see. Counting it here would make the position limit
+    # fire on a book that has not opened anything.
+    trades = [p for p in book if p.get("kind", "option") != "stock"]
+    if len(trades) > limits.max_open_positions:
         out.append(Finding(
             WARN, "too_many_positions",
-            f"{len(book)} open positions exceeds the "
+            f"{len(trades)} open positions exceeds the "
             f"{limits.max_open_positions} limit",
         ))
 
     total = sum(p.get("capital", 0.0) for p in book)
     pct = total / limits.account_value if limits.account_value else 0.0
     if pct > limits.max_total_capital_pct:
+        equity = sum(
+            p.get("capital", 0.0) for p in book if p.get("kind") == "stock"
+        )
+        note = f", of which ${equity:,.0f} is stock held" if equity else ""
         out.append(Finding(
             WARN, "over_committed",
             f"${total:,.0f} committed is {pct:.0%} of the account, above the "
-            f"{limits.max_total_capital_pct:.0%} limit",
+            f"{limits.max_total_capital_pct:.0%} limit{note}",
         ))
 
     counts: dict[str, int] = {}
@@ -374,7 +385,40 @@ def check_portfolio(
 
     out.extend(_correlation_findings(book, limits))
     out.extend(_beta_findings(book, limits))
+    out.extend(_collateral_findings(book, cash))
     return _sort(out)
+
+
+def _collateral_findings(book: list[dict], cash: float) -> list[Finding]:
+    """Whether the short options are actually secured by cash.
+
+    The strategy is described as selling puts against cash set aside, and the
+    sizing model reserves strike x 100 per contract on that basis. An account
+    can hold the same positions on margin, where the contracts are identical
+    and the risk is not: assignment draws on borrowing rather than on money
+    already earmarked, and a drawdown can force the position closed at the
+    worst moment rather than simply converting to stock.
+
+    Reported, never blocked. Which way to run the account is not a decision
+    this file gets to make - but the trade card should not say "collateral"
+    while implying cash that is not there.
+    """
+    if cash != cash:
+        return []
+    committed = sum(
+        p.get("capital", 0.0) for p in book if p.get("kind", "option") != "stock"
+    )
+    if committed <= 0 or cash >= committed:
+        return []
+
+    shortfall = committed - cash
+    return [Finding(
+        WARN, "margin_secured",
+        f"${committed:,.0f} of collateral against ${cash:,.0f} settled cash - "
+        f"${shortfall:,.0f} of these puts is margin-secured, not cash-secured. "
+        f"Assignment would draw on borrowing, and the sizing model assumes "
+        f"otherwise",
+    )]
 
 
 def _beta_findings(book: list[dict], limits: RiskLimits) -> list[Finding]:

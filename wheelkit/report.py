@@ -128,7 +128,7 @@ def print_trade_card(candidate: Candidate, *, index: int | None = None) -> None:
           f"({candidate.spread_pct:.1%} wide, quote {candidate.quote_age_note})")
     print()
     print(f"  CAPITAL    ${candidate.capital:,.0f} "
-          f"({'cash secured' if candidate.right == 'P' else 'shares held'})")
+          f"({'collateral' if candidate.right == 'P' else 'shares held'})")
     print(f"  BREAKEVEN  ${candidate.breakeven:.2f} "
           f"({candidate.cushion_pct:+.1%} from ${candidate.spot:.2f} spot, "
           f"{fmt_num(candidate.cushion_sigmas, '.2f')}σ of the expected move)")

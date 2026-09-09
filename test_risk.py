@@ -2193,3 +2193,170 @@ class TestDataBundle(unittest.TestCase):
         lines = self.wd.describe(self.old)
         self.assertTrue(any("1 row(s)" in l for l in lines))
         self.assertTrue(any("more days to IV rank" in l for l in lines))
+
+
+class TestAccountValueComesFromTheBroker(unittest.TestCase):
+    """Every risk limit is a share of this number, so a guess scales them all."""
+
+    def _args(self, **kw):
+        import argparse
+
+        base = dict(account_value=None, fallback_account_value=100_000.0,
+                    host="127.0.0.1", port=7497, alerts_only=True)
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def test_an_explicit_flag_wins(self):
+        import wheel_positions as wp
+
+        self.assertEqual(
+            wp.resolve_account_value(self._args(account_value=50_000.0), None),
+            50_000.0)
+
+    def test_the_broker_is_preferred_over_the_fallback(self):
+        from unittest.mock import patch
+
+        import wheel_positions as wp
+
+        with patch.object(wp, "load_account_value", return_value=(112_205.58, "ibkr")):
+            self.assertAlmostEqual(
+                wp.resolve_account_value(self._args(), None), 112_205.58)
+
+    def test_an_unreachable_broker_falls_back_and_says_so(self):
+        import contextlib
+        import io
+        from unittest.mock import patch
+
+        import wheel_positions as wp
+
+        err = io.StringIO()
+        with patch.object(wp, "load_account_value",
+                          return_value=(float("nan"), "unavailable")), \
+             contextlib.redirect_stderr(err):
+            value = wp.resolve_account_value(self._args(), None)
+        self.assertEqual(value, 100_000.0)
+        self.assertIn("fallback", err.getvalue())
+
+    def test_a_wrong_account_value_scales_every_limit(self):
+        # The reason this matters: the caps are percentages, so an account
+        # value that is 11% low makes every one of them 11% tight.
+        from wheelkit.risk import RiskLimits, check_portfolio
+
+        book = [{"symbol": "X", "capital": 65_000.0}]
+        guessed = check_portfolio(book, limits=RiskLimits(account_value=100_000))
+        actual = check_portfolio(book, limits=RiskLimits(account_value=112_205))
+        self.assertIn("over_committed", codes(guessed))
+        self.assertNotIn("over_committed", codes(actual))
+
+
+class TestEquityIsVisibleToTheCaps(unittest.TestCase):
+    """A large holding used to be invisible to every concentration check."""
+
+    LIMITS = None
+
+    def setUp(self):
+        from wheelkit.risk import RiskLimits
+
+        self.LIMITS = RiskLimits(account_value=112_205)
+        self.option = {"symbol": "PLTR", "capital": 16_000, "beta": 2.49}
+        self.stock = {"symbol": "NVDA", "capital": 112_314,
+                      "beta": 2.02, "kind": "stock"}
+
+    def test_options_alone_look_clean(self):
+        from wheelkit.risk import check_portfolio
+
+        self.assertEqual(check_portfolio([self.option], limits=self.LIMITS), [])
+
+    def test_the_same_book_with_its_stock_does_not(self):
+        from wheelkit.risk import check_portfolio
+
+        found = codes(check_portfolio([self.option, self.stock], limits=self.LIMITS))
+        self.assertIn("over_committed", found)
+        self.assertIn("beta_weighted_exposure", found)
+
+    def test_the_message_separates_stock_from_options(self):
+        from wheelkit.risk import check_portfolio
+
+        finding = next(f for f in check_portfolio(
+            [self.option, self.stock], limits=self.LIMITS)
+            if f.code == "over_committed")
+        self.assertIn("of which", finding.message)
+        self.assertIn("stock held", finding.message)
+
+    def test_stock_does_not_count_toward_the_position_limit(self):
+        # Three puts is three decisions. Holding shares is not a fourth.
+        from wheelkit.risk import RiskLimits, check_portfolio
+
+        limits = RiskLimits(account_value=1_000_000, max_open_positions=3)
+        book = [
+            {"symbol": s, "capital": 10_000} for s in ("A", "B", "C")
+        ] + [{"symbol": "D", "capital": 10_000, "kind": "stock"},
+             {"symbol": "E", "capital": 10_000, "kind": "stock"}]
+        self.assertNotIn("too_many_positions", codes(
+            check_portfolio(book, limits=limits)))
+
+    def test_a_fourth_option_still_trips_it(self):
+        from wheelkit.risk import RiskLimits, check_portfolio
+
+        limits = RiskLimits(account_value=1_000_000, max_open_positions=3)
+        book = [{"symbol": s, "capital": 10_000} for s in ("A", "B", "C", "D")]
+        self.assertIn("too_many_positions", codes(
+            check_portfolio(book, limits=limits)))
+
+    def test_stock_counts_toward_correlation_groups(self):
+        # Holding a miner and selling a put on a silver ETF is one bet.
+        from wheelkit.risk import RiskLimits, check_portfolio
+
+        found = codes(check_portfolio(
+            [{"symbol": "SLV", "capital": 9_000},
+             {"symbol": "GDX", "capital": 30_000, "kind": "stock"}],
+            limits=RiskLimits(account_value=100_000)))
+        self.assertIn("correlated_capital", found)
+
+
+class TestCollateralIsWhatItSaysItIs(unittest.TestCase):
+    """The same contract backed by cash and by margin is not the same risk."""
+
+    def setUp(self):
+        from wheelkit.risk import RiskLimits
+
+        self.limits = RiskLimits(account_value=112_205)
+        self.book = [{"symbol": "PLTR", "capital": 16_000}]
+
+    def test_cash_covering_the_collateral_is_silent(self):
+        from wheelkit.risk import check_portfolio
+
+        self.assertNotIn("margin_secured", codes(
+            check_portfolio(self.book, limits=self.limits, cash=20_000)))
+
+    def test_a_shortfall_is_reported_with_its_size(self):
+        from wheelkit.risk import check_portfolio
+
+        finding = next(f for f in check_portfolio(
+            self.book, limits=self.limits, cash=160.23)
+            if f.code == "margin_secured")
+        self.assertIn("$15,840", finding.message)
+
+    def test_unknown_cash_says_nothing(self):
+        # A broker that did not answer must not be read as zero cash.
+        from wheelkit.risk import check_portfolio
+
+        self.assertNotIn("margin_secured", codes(
+            check_portfolio(self.book, limits=self.limits)))
+
+    def test_stock_does_not_need_cash_collateral(self):
+        # Shares are already paid for; only the short options need securing.
+        from wheelkit.risk import check_portfolio
+
+        book = [{"symbol": "NVDA", "capital": 112_000, "kind": "stock"}]
+        self.assertNotIn("margin_secured", codes(
+            check_portfolio(book, limits=self.limits, cash=0.0)))
+
+    def test_it_reports_and_never_blocks(self):
+        # How to run the account is not this file's decision.
+        from wheelkit.risk import URGENT, check_portfolio
+
+        findings = check_portfolio(self.book, limits=self.limits, cash=0.0)
+        margin = [f for f in findings if f.code == "margin_secured"]
+        self.assertTrue(margin)
+        self.assertNotEqual(margin[0].level, URGENT)
