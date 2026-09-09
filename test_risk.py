@@ -2312,3 +2312,51 @@ class TestEquityIsVisibleToTheCaps(unittest.TestCase):
              {"symbol": "GDX", "capital": 30_000, "kind": "stock"}],
             limits=RiskLimits(account_value=100_000)))
         self.assertIn("correlated_capital", found)
+
+
+class TestCollateralIsWhatItSaysItIs(unittest.TestCase):
+    """The same contract backed by cash and by margin is not the same risk."""
+
+    def setUp(self):
+        from wheelkit.risk import RiskLimits
+
+        self.limits = RiskLimits(account_value=112_205)
+        self.book = [{"symbol": "PLTR", "capital": 16_000}]
+
+    def test_cash_covering_the_collateral_is_silent(self):
+        from wheelkit.risk import check_portfolio
+
+        self.assertNotIn("margin_secured", codes(
+            check_portfolio(self.book, limits=self.limits, cash=20_000)))
+
+    def test_a_shortfall_is_reported_with_its_size(self):
+        from wheelkit.risk import check_portfolio
+
+        finding = next(f for f in check_portfolio(
+            self.book, limits=self.limits, cash=160.23)
+            if f.code == "margin_secured")
+        self.assertIn("$15,840", finding.message)
+
+    def test_unknown_cash_says_nothing(self):
+        # A broker that did not answer must not be read as zero cash.
+        from wheelkit.risk import check_portfolio
+
+        self.assertNotIn("margin_secured", codes(
+            check_portfolio(self.book, limits=self.limits)))
+
+    def test_stock_does_not_need_cash_collateral(self):
+        # Shares are already paid for; only the short options need securing.
+        from wheelkit.risk import check_portfolio
+
+        book = [{"symbol": "NVDA", "capital": 112_000, "kind": "stock"}]
+        self.assertNotIn("margin_secured", codes(
+            check_portfolio(book, limits=self.limits, cash=0.0)))
+
+    def test_it_reports_and_never_blocks(self):
+        # How to run the account is not this file's decision.
+        from wheelkit.risk import URGENT, check_portfolio
+
+        findings = check_portfolio(self.book, limits=self.limits, cash=0.0)
+        margin = [f for f in findings if f.code == "margin_secured"]
+        self.assertTrue(margin)
+        self.assertNotEqual(margin[0].level, URGENT)

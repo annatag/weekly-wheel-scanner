@@ -23,6 +23,7 @@ from wheelkit.notify import NotifyConfig, dispatch
 from wheelkit.positions import (
     DEFAULT_POSITIONS_FILE,
     DEFAULT_SHARES_FILE,
+    load_account_cash,
     load_account_value,
     load_shares,
     SourceReport,
@@ -499,7 +500,10 @@ def main() -> int:
     for entry in book:
         entry["beta"] = betas.get(entry["symbol"], float("nan"))
 
-    portfolio = check_portfolio(book, limits=limits)
+    cash, _ = load_account_cash(
+        "auto", provider=provider, host=args.host, port=args.port
+    )
+    portfolio = check_portfolio(book, limits=limits, cash=cash)
     flagged = [p for p in positions if p.findings]
     everything = [f for p in positions for f in p.findings] + portfolio
     level = worst_level(everything)

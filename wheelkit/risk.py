@@ -318,6 +318,7 @@ def check_portfolio(
     *,
     proposed: dict | None = None,
     limits: RiskLimits | None = None,
+    cash: float = float("nan"),
 ) -> list[Finding]:
     """Aggregate exposure across everything open, plus an optional new trade.
 
@@ -384,7 +385,40 @@ def check_portfolio(
 
     out.extend(_correlation_findings(book, limits))
     out.extend(_beta_findings(book, limits))
+    out.extend(_collateral_findings(book, cash))
     return _sort(out)
+
+
+def _collateral_findings(book: list[dict], cash: float) -> list[Finding]:
+    """Whether the short options are actually secured by cash.
+
+    The strategy is described as selling puts against cash set aside, and the
+    sizing model reserves strike x 100 per contract on that basis. An account
+    can hold the same positions on margin, where the contracts are identical
+    and the risk is not: assignment draws on borrowing rather than on money
+    already earmarked, and a drawdown can force the position closed at the
+    worst moment rather than simply converting to stock.
+
+    Reported, never blocked. Which way to run the account is not a decision
+    this file gets to make - but the trade card should not say "collateral"
+    while implying cash that is not there.
+    """
+    if cash != cash:
+        return []
+    committed = sum(
+        p.get("capital", 0.0) for p in book if p.get("kind", "option") != "stock"
+    )
+    if committed <= 0 or cash >= committed:
+        return []
+
+    shortfall = committed - cash
+    return [Finding(
+        WARN, "margin_secured",
+        f"${committed:,.0f} of collateral against ${cash:,.0f} settled cash - "
+        f"${shortfall:,.0f} of these puts is margin-secured, not cash-secured. "
+        f"Assignment would draw on borrowing, and the sizing model assumes "
+        f"otherwise",
+    )]
 
 
 def _beta_findings(book: list[dict], limits: RiskLimits) -> list[Finding]:

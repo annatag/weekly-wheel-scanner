@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Scan a universe for the best cash-secured puts or covered calls to sell.
+"""Scan a universe for the best short puts or covered calls to sell.
 
 Read-only: this script fetches market data and never places, modifies or
 cancels an order.
 
-    python weekly_wheel_scan.py                     # cash-secured puts
+    python weekly_wheel_scan.py                     # short puts
     python weekly_wheel_scan.py --right call        # covered calls you can write
     python weekly_wheel_scan.py --symbols AAPL,AMD --top 3
 """
@@ -48,7 +48,7 @@ DEFAULT_SYMBOLS = [
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Rank cash-secured puts or covered calls worth selling.",
+        description="Rank short puts or covered calls worth selling.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--provider", choices=("alpaca", "ibkr"), default="alpaca")
@@ -309,7 +309,7 @@ def main() -> int:
         symbols = sorted(positions)
 
     print(f"Scanning {len(symbols)} symbol(s) for "
-          f"{'cash-secured puts' if right == 'P' else 'covered calls'} "
+          f"{'short puts' if right == 'P' else 'covered calls'} "
           f"via {args.provider}...\n")
 
     earnings = EarningsCalendar.build(

@@ -153,7 +153,7 @@ class WheelConfig:
 @dataclass
 class Candidate:
     symbol: str
-    right: str  # "P" cash-secured put, "C" covered call
+    right: str  # "P" short put, "C" covered call
     occ_symbol: str
     expiration: date
     dte: int

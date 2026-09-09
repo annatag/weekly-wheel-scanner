@@ -218,6 +218,22 @@ python wheel_positions.py --check GM 87 P 2026-09-18 1.09
 Refuses a strike sold in the money, a delta above the band, an expiry that
 spans earnings, or a falling-knife setup, and suggests a position size.
 
+**On collateral.** The sizing model reserves strike × 100 per contract, which
+is what a cash-secured put requires. An account can hold the same positions on
+margin — identical contracts, different risk: assignment draws on borrowing
+rather than on money already set aside, and a drawdown can force a close at the
+worst moment instead of simply converting to stock. The monitor compares
+committed collateral against settled cash and says so when they diverge:
+
+```
+$16,000 of collateral against $160 settled cash - $15,840 of these puts is
+margin-secured, not cash-secured. Assignment would draw on borrowing, and
+the sizing model assumes otherwise
+```
+
+It reports and never blocks. Which way to run the account is not the tool's
+decision — but the trade card should not imply cash that is not there.
+
 **At sizing** — contracts are scaled so a two-sigma adverse move stays inside
 a risk budget, rather than filling a fixed cash sleeve. Filling a sleeve puts
 the most contracts on the cheapest stock, which is usually the most volatile:

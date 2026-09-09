@@ -553,6 +553,32 @@ def account_value_ibkr(
         ib.disconnect()
 
 
+def account_cash_ibkr(
+    host: str = "127.0.0.1", port: int = 7497, client_id: int = 27
+) -> float:
+    """Settled cash from TWS, or NaN.
+
+    Separate from net liquidation because the difference is the whole
+    question: a short put backed by cash and one backed by margin are the
+    same contract and not the same risk.
+    """
+    from ib_async import IB
+
+    ib = IB()
+    try:
+        ib.connect(host, port, clientId=client_id, readonly=True, timeout=12)
+    except Exception as exc:
+        raise FetchError(f"Could not reach TWS on {host}:{port} ({exc})") from exc
+    try:
+        for account in ib.managedAccounts():
+            for value in ib.accountValues(account):
+                if value.tag == "TotalCashValue" and value.currency == "USD":
+                    return float(value.value)
+        return float("nan")
+    finally:
+        ib.disconnect()
+
+
 def account_value_alpaca(provider: AlpacaProvider) -> float:
     from .providers import ALPACA_TRADE_URL
 
@@ -561,6 +587,43 @@ def account_value_alpaca(provider: AlpacaProvider) -> float:
         return float((payload or {}).get("equity"))
     except (TypeError, ValueError):
         return float("nan")
+
+
+def load_account_cash(
+    source: str = "auto",
+    *,
+    provider: AlpacaProvider | None = None,
+    host: str = "127.0.0.1",
+    port: int = 7497,
+) -> tuple[float, str]:
+    """Settled cash, and where it came from. NaN when nothing answers."""
+    order = ("ibkr", "alpaca") if source == "auto" else (source,)
+    import logging
+
+    ib_logger = logging.getLogger("ib_async")
+    previous = ib_logger.level
+    ib_logger.setLevel(logging.CRITICAL)
+    try:
+        for name in order:
+            try:
+                if name == "ibkr":
+                    value = account_cash_ibkr(host, port)
+                elif name == "alpaca" and provider is not None:
+                    from .providers import ALPACA_TRADE_URL
+
+                    payload = get_json(
+                        f"{ALPACA_TRADE_URL}/v2/account", headers=provider._headers
+                    )
+                    value = float((payload or {}).get("cash"))
+                else:
+                    continue
+            except Exception:
+                continue
+            if value == value:
+                return value, name
+    finally:
+        ib_logger.setLevel(previous)
+    return float("nan"), "unavailable"
 
 
 def load_account_value(
