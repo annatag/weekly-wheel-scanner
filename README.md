@@ -796,7 +796,30 @@ a file does.
 
 `record` looks the contract up in `wheel_scan_results.csv`, copies the
 suggested strike, expiry, limit and score **into the row**, and states how the
-fill differed:
+fill differed.
+
+**When the contract is not in that file, it searches the archive.** The results
+file holds one run's top N and is overwritten by the next, so a contract the
+scanner genuinely surfaced can be missing from it an hour later — it ranked
+eleventh, or the next run covered other symbols. And `wheel_advise.py` writes
+no results file at all, so a trade found through the deep-dive had nothing to
+match against and was condemned to `--no-scan`, which quietly biased the record
+toward trades taken from the top of a scan.
+
+The archive holds every ranked candidate from every run, so `record` falls back
+to it and says which scan matched:
+
+```
+Not in wheel_scan_results.csv; matched the archived 2026-09-10-1049 scan instead.
+Recorded BX $120P Sep 18 x1 at $1.00 ($100 credit)
+  Matches the 2026-09-10 scan (score 72, delta 0.20).
+```
+
+It takes the most recent archived scan carrying that exact contract — symbol,
+right, expiry, nearest strike — so the fallback cannot turn an unrecommended
+trade into a matched one. A contract no run ever surfaced is still refused.
+
+Here is what a drifted fill looks like:
 
 ```
 Recorded FCX $68P Sep 11 x2 at $0.61 ($122 credit)
