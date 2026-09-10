@@ -155,20 +155,62 @@ def read_positions_alpaca(provider: AlpacaProvider) -> list[OpenOption]:
     return out
 
 
-def read_positions_ibkr(
-    host: str = "127.0.0.1", port: int = 7497, client_id: int = 24
-) -> list[OpenOption]:
-    """Option positions from TWS. Needs no market-data entitlement."""
+# TWS identifies each API client by a number, and refuses a second connection
+# on one already in use. A script that dies without disconnecting leaves its
+# slot occupied until TWS restarts - and a fixed client id means every later
+# run collides with the corpse, hangs to its timeout, and reports "TWS not
+# reachable". Which is indistinguishable from TWS being closed, so the monitor
+# reads zero positions on a live book.
+#
+# The connection now walks a range instead. The first id is the one a healthy
+# run would use, so behaviour is unchanged when nothing is stuck; after that it
+# tries random high ids, which a human clicking around in TWS is unlikely to
+# have taken.
+IB_CLIENT_IDS = {"positions": 24, "shares": 25, "value": 26, "cash": 27}
+IB_RETRY_RANGE = (900, 9000)
+IB_ATTEMPTS = 5
+IB_TIMEOUT = 6.0
+
+
+def connect_ib(host: str, port: int, purpose: str):
+    """A read-only TWS connection, retrying past client ids that are stuck.
+
+    Raises FetchError with the last failure when every attempt is exhausted,
+    so callers keep the "TWS not reachable" behaviour they already handle.
+    """
+    import random
+
     from ib_async import IB
 
-    ib = IB()
-    try:
-        ib.connect(host, port, clientId=client_id, readonly=True, timeout=12)
-    except Exception as exc:
-        raise FetchError(
-            f"Could not reach TWS on {host}:{port} ({exc}). Start TWS, or use "
-            "--source csv."
-        ) from exc
+    first = IB_CLIENT_IDS.get(purpose, 24)
+    candidates = [first] + [
+        random.randint(*IB_RETRY_RANGE) for _ in range(IB_ATTEMPTS - 1)
+    ]
+
+    last: Exception | None = None
+    for client_id in candidates:
+        ib = IB()
+        try:
+            ib.connect(host, port, clientId=client_id, readonly=True,
+                       timeout=IB_TIMEOUT)
+            return ib
+        except Exception as exc:
+            last = exc
+            try:
+                ib.disconnect()
+            except Exception:
+                pass
+    raise FetchError(
+        f"Could not reach TWS on {host}:{port} after {len(candidates)} client "
+        f"ids ({last}). Start TWS, or use --source csv."
+    )
+
+
+def read_positions_ibkr(
+    host: str = "127.0.0.1", port: int = 7497
+) -> list[OpenOption]:
+    """Option positions from TWS. Needs no market-data entitlement."""
+    ib = connect_ib(host, port, "positions")
 
     out: list[OpenOption] = []
     try:
@@ -425,7 +467,7 @@ def read_shares_csv(path: Path = DEFAULT_SHARES_FILE) -> dict[str, ShareLot]:
 
 
 def read_shares_ibkr(
-    host: str = "127.0.0.1", port: int = 7497, client_id: int = 25
+    host: str = "127.0.0.1", port: int = 7497
 ) -> dict[str, ShareLot]:
     """Stock positions from TWS, with the broker's own average cost.
 
@@ -434,16 +476,7 @@ def read_shares_ibkr(
     $132.17, a $302 error on 100 shares - and the covered-call planner gates
     every strike on that figure.
     """
-    from ib_async import IB
-
-    ib = IB()
-    try:
-        ib.connect(host, port, clientId=client_id, readonly=True, timeout=12)
-    except Exception as exc:
-        raise FetchError(
-            f"Could not reach TWS on {host}:{port} ({exc}). Start TWS, or use "
-            "--source csv."
-        ) from exc
+    ib = connect_ib(host, port, "shares")
     try:
         out: dict[str, ShareLot] = {}
         for item in ib.positions():
@@ -526,7 +559,7 @@ def load_shares(
 
 
 def account_value_ibkr(
-    host: str = "127.0.0.1", port: int = 7497, client_id: int = 26
+    host: str = "127.0.0.1", port: int = 7497
 ) -> float:
     """Net liquidation from TWS, or NaN.
 
@@ -536,13 +569,7 @@ def account_value_ibkr(
     connected to; guessing beside it is the same mistake as the hand-typed
     share basis.
     """
-    from ib_async import IB
-
-    ib = IB()
-    try:
-        ib.connect(host, port, clientId=client_id, readonly=True, timeout=12)
-    except Exception as exc:
-        raise FetchError(f"Could not reach TWS on {host}:{port} ({exc})") from exc
+    ib = connect_ib(host, port, "value")
     try:
         for account in ib.managedAccounts():
             for value in ib.accountValues(account):
@@ -554,7 +581,7 @@ def account_value_ibkr(
 
 
 def account_cash_ibkr(
-    host: str = "127.0.0.1", port: int = 7497, client_id: int = 27
+    host: str = "127.0.0.1", port: int = 7497
 ) -> float:
     """Settled cash from TWS, or NaN.
 
@@ -562,13 +589,7 @@ def account_cash_ibkr(
     question: a short put backed by cash and one backed by margin are the
     same contract and not the same risk.
     """
-    from ib_async import IB
-
-    ib = IB()
-    try:
-        ib.connect(host, port, clientId=client_id, readonly=True, timeout=12)
-    except Exception as exc:
-        raise FetchError(f"Could not reach TWS on {host}:{port} ({exc})") from exc
+    ib = connect_ib(host, port, "cash")
     try:
         for account in ib.managedAccounts():
             for value in ib.accountValues(account):
