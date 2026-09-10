@@ -23,6 +23,11 @@ from typing import Iterable, Protocol
 
 from .netio import FetchError, get_json
 
+# A two-sided quote wider than this is not telling you where the stock is.
+# Every name this scans clears $50M a day, so an in-hours spread is pennies;
+# anything approaching a percent means one side of the book is stale.
+MAX_QUOTE_SPREAD_PCT = 0.01
+
 ALPACA_DATA_URL = "https://data.alpaca.markets"
 ALPACA_TRADE_URL = "https://paper-api.alpaca.markets"
 
@@ -287,10 +292,23 @@ class AlpacaProvider:
         return [b for b in bars if b.close > 0]
 
     def spot(self, symbol: str) -> tuple[float, datetime | None]:
-        """Latest trade, falling back through quote mid then daily close.
+        """Quote mid when the book is tight, else the last trade.
 
-        Pre-market the `latestTrade` can be an odd-lot print far from fair
-        value, so a two-sided quote mid is preferred when both sides exist.
+        Pre-market a `latestTrade` can be an odd-lot print far from fair
+        value, so a two-sided quote mid is preferred - but only when the
+        quote is actually informative.
+
+        The IEX book is thin, and a stale or one-lot side produces a spread
+        that makes the midpoint meaningless. Observed live on BX: IEX quoted
+        119.09/127.58 while the consolidated tape had 127.09/127.17 and the
+        last trade was 127.50. The midpoint of that IEX quote is 123.33 - a
+        price the stock was nowhere near, arriving with no error and looking
+        perfectly stable on repeat reads, because the quote itself was stale.
+
+        Every downstream number rests on this: moneyness, delta, cushion,
+        assignment odds. A 3% error in spot moved one contract's delta from
+        0.19 to 0.27 and flipped the entry gate's verdict. So a quote wider
+        than `MAX_QUOTE_SPREAD_PCT` is discarded in favour of a real print.
         """
         payload = get_json(
             f"{ALPACA_DATA_URL}/v2/stocks/{symbol}/snapshot",
@@ -299,11 +317,14 @@ class AlpacaProvider:
         )
         quote = payload.get("latestQuote") or {}
         bid, ask = _as_float(quote.get("bp")), _as_float(quote.get("ap"))
-        if bid > 0 and ask > 0 and ask >= bid:
-            return (bid + ask) / 2, _parse_ts(quote.get("t"))
-
         trade = payload.get("latestTrade") or {}
         price = _as_float(trade.get("p"))
+
+        if bid > 0 and ask > 0 and ask >= bid:
+            mid = (bid + ask) / 2
+            if mid > 0 and (ask - bid) / mid <= MAX_QUOTE_SPREAD_PCT:
+                return mid, _parse_ts(quote.get("t"))
+
         if price > 0:
             return price, _parse_ts(trade.get("t"))
 

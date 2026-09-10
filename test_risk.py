@@ -2630,3 +2630,77 @@ class TestIbClientIdCollision(unittest.TestCase):
         from wheelkit.positions import IB_CLIENT_IDS
 
         self.assertEqual(len(set(IB_CLIENT_IDS.values())), len(IB_CLIENT_IDS))
+
+
+class TestSpotIgnoresABrokenQuote(unittest.TestCase):
+    """Every downstream number rests on spot: moneyness, delta, cushion."""
+
+    def _provider_returning(self, payload):
+        """A stand-in carrying only what spot() reads.
+
+        _headers is a read-only property on the real provider, and building
+        one would need credentials this test must not require.
+        """
+        from unittest.mock import patch
+
+        import wheelkit.providers as wp
+
+        class Stub:
+            _headers = {}
+            quote_feed = "iex"
+            spot = wp.AlpacaProvider.spot
+
+        return Stub(), patch.object(wp, "get_json", return_value=payload)
+
+    def test_a_tight_quote_is_used(self):
+        provider, patched = self._provider_returning({
+            "latestQuote": {"bp": 127.09, "ap": 127.17, "t": None},
+            "latestTrade": {"p": 127.50, "t": None},
+        })
+        with patched:
+            price, _ = provider.spot("BX")
+        self.assertAlmostEqual(price, 127.13, places=2)
+
+    def test_a_broken_quote_falls_through_to_the_trade(self):
+        # Observed live: IEX quoted 119.09/127.58 on BX while the consolidated
+        # tape had 127.09/127.17. The midpoint, 123.33, is a price the stock
+        # was nowhere near - and it looked stable on repeat reads because the
+        # quote itself was stale.
+        provider, patched = self._provider_returning({
+            "latestQuote": {"bp": 119.09, "ap": 127.58, "t": None},
+            "latestTrade": {"p": 127.50, "t": None},
+        })
+        with patched:
+            price, _ = provider.spot("BX")
+        self.assertAlmostEqual(price, 127.50, places=2)
+
+    def test_the_old_behaviour_would_have_been_three_percent_out(self):
+        # Guards the size of the error, not just its direction.
+        bad_mid = (119.09 + 127.58) / 2
+        self.assertGreater(abs(bad_mid / 127.50 - 1), 0.03)
+
+    def test_a_one_sided_quote_falls_through(self):
+        provider, patched = self._provider_returning({
+            "latestQuote": {"bp": 0, "ap": 127.58, "t": None},
+            "latestTrade": {"p": 127.50, "t": None},
+        })
+        with patched:
+            price, _ = provider.spot("BX")
+        self.assertAlmostEqual(price, 127.50, places=2)
+
+    def test_with_no_trade_it_falls_back_to_the_bar(self):
+        provider, patched = self._provider_returning({
+            "latestQuote": {"bp": 119.09, "ap": 127.58, "t": None},
+            "latestTrade": {},
+            "dailyBar": {"c": 126.80, "t": None},
+        })
+        with patched:
+            price, _ = provider.spot("BX")
+        self.assertAlmostEqual(price, 126.80, places=2)
+
+    def test_the_threshold_admits_a_normal_spread(self):
+        # A penny on a $127 stock must not be treated as broken.
+        from wheelkit.providers import MAX_QUOTE_SPREAD_PCT
+
+        self.assertGreater(MAX_QUOTE_SPREAD_PCT, 0.10 / 127.0)
+        self.assertLess(MAX_QUOTE_SPREAD_PCT, 8.49 / 123.33)
