@@ -22,11 +22,13 @@ import sys
 from datetime import date
 from pathlib import Path
 
+from wheelkit.archive import DEFAULT_ARCHIVE_DIR
 from wheelkit.fills import (
     DEFAULT_FILLS_FILE,
     Fill,
     append_fill,
     best_match,
+    best_match_in_archive,
     compute_drift,
     find_open,
     load_fills,
@@ -58,6 +60,9 @@ def parse_args() -> argparse.Namespace:
                           "into the row, so a later scan cannot overwrite them.")
     rec.add_argument("--scan-date", help="YYYY-MM-DD; defaults to the scan "
                                          "file's modification date")
+    rec.add_argument("--archive-dir", type=Path, default=DEFAULT_ARCHIVE_DIR,
+                     help="Searched when the results file does not have the "
+                          "contract — it holds every run, not just the last")
     rec.add_argument("--no-scan", action="store_true",
                      help="An entry with no scan behind it. Logged, not graded.")
     rec.add_argument("--date", help="Fill date, YYYY-MM-DD (default: today)")
@@ -111,22 +116,38 @@ def cmd_record(args: argparse.Namespace) -> int:
     )
 
     if not args.no_scan:
-        if not args.scan_file.exists():
-            print(f"No scan file at {args.scan_file}. Pass --scan-file, or "
-                  "--no-scan to log this as an ungraded trade.", file=sys.stderr)
-            return 2
-        match = best_match(read_suggestions(args.scan_file), symbol, right,
-                           args.strike)
-        if match is None:
-            print(f"{symbol} {right} is not in {args.scan_file}. This trade did "
-                  "not come from that scan; log it with --no-scan, or point "
-                  "--scan-file at the run it did come from.", file=sys.stderr)
-            return 2
-        fill.scan_file = str(args.scan_file)
-        fill.scan_date = (
-            date.fromisoformat(args.scan_date) if args.scan_date
-            else scan_date_of(args.scan_file)
-        )
+        match = None
+        if args.scan_file.exists():
+            match = best_match(read_suggestions(args.scan_file), symbol, right,
+                               args.strike)
+        if match is not None:
+            fill.scan_file = str(args.scan_file)
+            fill.scan_date = (
+                date.fromisoformat(args.scan_date) if args.scan_date
+                else scan_date_of(args.scan_file)
+            )
+        else:
+            # The results file holds one run's top N and is overwritten by the
+            # next, and wheel_advise.py writes no file at all. The archive has
+            # every ranked candidate from every run, so look there before
+            # giving up and calling a real recommendation ungraded.
+            found = best_match_in_archive(
+                symbol, right, args.strike, expiration,
+                directory=args.archive_dir)
+            if found is None:
+                print(f"{symbol} ${args.strike:g}{right} {expiration} is not in "
+                      f"{args.scan_file} nor in any archived scan under "
+                      f"{args.archive_dir}. No run recommended this contract; "
+                      f"log it with --no-scan.", file=sys.stderr)
+                return 2
+            match, scan_id, scanned_on = found
+            fill.scan_file = str(args.archive_dir / "scans" / f"{scan_id}.csv")
+            fill.scan_date = (
+                date.fromisoformat(args.scan_date) if args.scan_date
+                else scanned_on
+            )
+            print(f"Not in {args.scan_file.name}; matched the archived "
+                  f"{scan_id} scan instead.")
         fill.suggested_expiration = match.expiration
         fill.suggested_strike = match.strike
         fill.suggested_mid = match.mid

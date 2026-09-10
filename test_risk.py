@@ -2757,3 +2757,89 @@ class TestCheckpointWording(unittest.TestCase):
             entry_date=date.today() - timedelta(days=5), limits=RiskLimits(),
         )
         self.assertIn("time_stop_unknown", {f.code for f in findings})
+
+
+class TestRecordFallsBackToTheArchive(unittest.TestCase):
+    """The results file holds one run's top N and is overwritten by the next."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.root = Path(self.dir.name)
+        (self.root / "archive" / "scans").mkdir(parents=True)
+
+    def _archive_scan(self, scan_id, symbol="BX", strike=120.0, mid=1.04,
+                      expiration="2026-09-18", score=72.0):
+        header = ("scan_id,scanned_on,symbol,right,occ_symbol,expiration,dte,"
+                  "strike,spot,mid,bid,ask,spread_pct,option_volume,iv,delta,"
+                  "prob_itm,prob_profit,vrp,skew_ratio,term_slope,rv20,"
+                  "rv_percentile,max_drawdown_60d,gap_down_p05,cushion_sigmas,"
+                  "cushion_pct,breakeven,return_on_capital,annualised_return,"
+                  "trend_score,setup,contracts,capital,credit,score\n")
+        row = (f"{scan_id},{scan_id[:10]},{symbol},P,x,{expiration},8,{strike},"
+               f"127,{mid},1.0,1.1,0.05,100,0.4,-0.20,0.2,0.8,1.3,1.0,0.95,"
+               f"0.26,50,-0.05,-0.02,0.8,0.05,119,0.008,0.36,50,pullback,1,"
+               f"12000,100,{score}\n")
+        (self.root / "archive" / "scans" / f"{scan_id}.csv").write_text(
+            header + row, encoding="utf-8")
+
+    def test_a_contract_only_in_the_archive_is_found(self):
+        from datetime import date as _date
+
+        from wheelkit.fills import best_match_in_archive
+
+        self._archive_scan("2026-09-10-1049")
+        found = best_match_in_archive("BX", "P", 120.0, _date(2026, 9, 18),
+                                      directory=self.root / "archive")
+        self.assertIsNotNone(found)
+        self.assertEqual(found[1], "2026-09-10-1049")
+        self.assertAlmostEqual(found[0].mid, 1.04)
+
+    def test_the_most_recent_scan_wins(self):
+        from datetime import date as _date
+
+        from wheelkit.fills import best_match_in_archive
+
+        self._archive_scan("2026-09-10-1042", mid=1.07, score=70.1)
+        self._archive_scan("2026-09-10-1049", mid=1.04, score=72.0)
+        found = best_match_in_archive("BX", "P", 120.0, _date(2026, 9, 18),
+                                      directory=self.root / "archive")
+        self.assertEqual(found[1], "2026-09-10-1049")
+        self.assertAlmostEqual(found[0].mid, 1.04)
+
+    def test_the_expiry_must_match(self):
+        from datetime import date as _date
+
+        from wheelkit.fills import best_match_in_archive
+
+        self._archive_scan("2026-09-10-1049", expiration="2026-09-25")
+        self.assertIsNone(best_match_in_archive(
+            "BX", "P", 120.0, _date(2026, 9, 18),
+            directory=self.root / "archive"))
+
+    def test_an_unrecommended_contract_is_still_refused(self):
+        # The fallback must not turn every trade into a matched one.
+        from datetime import date as _date
+
+        from wheelkit.fills import best_match_in_archive
+
+        self._archive_scan("2026-09-10-1049")
+        self.assertIsNone(best_match_in_archive(
+            "ZZZZ", "P", 10.0, _date(2026, 9, 18),
+            directory=self.root / "archive"))
+
+    def test_an_empty_archive_returns_nothing(self):
+        from wheelkit.fills import best_match_in_archive
+
+        self.assertIsNone(best_match_in_archive(
+            "BX", "P", 120.0, directory=self.root / "archive"))
+
+    def test_the_nearest_strike_within_that_run_is_taken(self):
+        from datetime import date as _date
+
+        from wheelkit.fills import best_match_in_archive
+
+        self._archive_scan("2026-09-10-1049", strike=118.0, mid=0.80)
+        found = best_match_in_archive("BX", "P", 118.4, _date(2026, 9, 18),
+                                      directory=self.root / "archive")
+        self.assertAlmostEqual(found[0].strike, 118.0)
