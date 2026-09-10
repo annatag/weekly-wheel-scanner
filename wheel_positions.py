@@ -259,11 +259,18 @@ def run_check(args: argparse.Namespace, provider: AlpacaProvider,
             "no contract count fits the risk budget at this strike",
         ))
 
+    cash, _ = load_account_cash(
+        "auto", provider=provider, host=args.host, port=args.port
+    )
     portfolio = check_portfolio(
-        [{"symbol": p.symbol, "capital": p.capital} for p in positions],
-        proposed={"symbol": symbol,
-                  "capital": sizing.capital if sizing else strike * 100},
+        build_book(provider, args, positions),
+        proposed={
+            "symbol": symbol,
+            "capital": sizing.capital if sizing else strike * 100,
+            "beta": position_betas(provider, {symbol}).get(symbol, float("nan")),
+        },
         limits=limits,
+        cash=cash,
     )
 
     print()
@@ -275,6 +282,22 @@ def run_check(args: argparse.Namespace, provider: AlpacaProvider,
     print("  BLOCKED" if blocking else "  PASS WITH WARNINGS")
     print_findings(findings + portfolio, indent="    ")
     return 1 if blocking else 0
+
+
+def build_book(provider, args: argparse.Namespace, positions: list) -> list[dict]:
+    """Everything the concentration caps should see: options, stock, betas.
+
+    Shared deliberately. This was assembled inline in the monitor and not at
+    all in --check, so the pre-trade gate - the step that exists to refuse a
+    trade - judged it against a fraction of the account and passed things the
+    monitor was flagging at the same moment.
+    """
+    book = [{"symbol": p.symbol, "capital": p.capital} for p in positions]
+    book += equity_exposure(provider, args)
+    betas = position_betas(provider, {entry["symbol"] for entry in book})
+    for entry in book:
+        entry["beta"] = betas.get(entry["symbol"], float("nan"))
+    return book
 
 
 def equity_exposure(provider, args: argparse.Namespace) -> list[dict]:
@@ -494,11 +517,7 @@ def main() -> int:
     # concentration caps counted option positions only, so a large holding was
     # invisible to every one of them - the book could read "1 position, no
     # alerts" while most of the account sat in a single high-beta stock.
-    equity = equity_exposure(provider, args)
-    book = [{"symbol": p.symbol, "capital": p.capital} for p in positions] + equity
-    betas = position_betas(provider, {entry["symbol"] for entry in book})
-    for entry in book:
-        entry["beta"] = betas.get(entry["symbol"], float("nan"))
+    book = build_book(provider, args, positions)
 
     cash, _ = load_account_cash(
         "auto", provider=provider, host=args.host, port=args.port
