@@ -581,7 +581,7 @@ def check_position(
     out.extend(_time_stop(
         symbol=symbol, right=right, strike=strike, expiration=expiration,
         dte=dte, captured=captured, current_mid=current_mid,
-        entry_date=entry_date, limits=limits,
+        entry_credit=entry_credit, entry_date=entry_date, limits=limits,
     ))
 
     if dte <= limits.gamma_window_dte and not itm and abs_delta == abs_delta:
@@ -635,6 +635,7 @@ def _time_stop(
     dte: int,
     captured: float,
     current_mid: float,
+    entry_credit: float,
     limits: RiskLimits,
     entry_date: date | None = None,
     today: date | None = None,
@@ -673,12 +674,27 @@ def _time_stop(
     if captured >= limits.time_stop_min_capture:
         return []
 
-    shortfall = limits.time_stop_min_capture - captured
+    # State the gap as a price, not as a subtraction the reader has to do.
+    # This said "68% short of the 35% floor", which is percentage points of
+    # the credit - a scale nobody carries in their head, and one that reads
+    # as though 68 related to 35. Two real prices say the same thing.
+    where = (
+        f"is {abs(captured):.0%} underwater on its credit" if captured < 0
+        else f"has banked {captured:.0%} of its credit"
+    )
+    target = (
+        entry_credit * (1.0 - limits.time_stop_min_capture)
+        if entry_credit > 0 else float("nan")
+    )
+    gap = (
+        f"it would need to fall from ${current_mid:.2f} to ${target:.2f}"
+        if target == target
+        else f"it is at ${current_mid:.2f}"
+    )
     return [Finding(
         WARN, "time_stop",
-        f"{symbol} ${strike:g}{right} has captured {captured:.0%} of its credit "
-        f"by the {checkpoint_dte}-DTE checkpoint ({deadline:%b %d}), "
-        f"{shortfall:.0%} short of the {limits.time_stop_min_capture:.0%} floor "
-        f"- close, roll out, or decide to hold it deliberately "
-        f"(buyback ${current_mid:.2f}, {dte} DTE left)",
+        f"{symbol} ${strike:g}{right} {where} at the {checkpoint_dte}-DTE "
+        f"checkpoint ({deadline:%b %d}). The floor is "
+        f"{limits.time_stop_min_capture:.0%} banked - {gap} to clear it, with "
+        f"{dte} DTE left. Close, roll out, or decide to hold it deliberately",
     )]

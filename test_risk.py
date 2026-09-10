@@ -2704,3 +2704,56 @@ class TestSpotIgnoresABrokenQuote(unittest.TestCase):
 
         self.assertGreater(MAX_QUOTE_SPREAD_PCT, 0.10 / 127.0)
         self.assertLess(MAX_QUOTE_SPREAD_PCT, 8.49 / 123.33)
+
+
+class TestCheckpointWording(unittest.TestCase):
+    """The message is read on a phone, mid-afternoon, once."""
+
+    def _msg(self, entry_credit, current_mid):
+        from wheelkit.risk import RiskLimits, check_position
+
+        exp = date.today() + timedelta(days=4)
+        findings = check_position(
+            symbol="PLTR", right="P", strike=160.0, spot=167.5,
+            expiration=exp, dte=4, delta=-0.25, entry_credit=entry_credit,
+            current_mid=current_mid, entry_date=date.today() - timedelta(days=5),
+            limits=RiskLimits(),
+        )
+        return next(f.message for f in findings if f.code == "time_stop")
+
+    def test_underwater_is_said_plainly(self):
+        message = self._msg(1.40, 1.86)
+        self.assertIn("33% underwater", message)
+        self.assertNotIn("short of", message)
+
+    def test_it_names_the_price_that_would_clear_the_floor(self):
+        # $1.40 credit, 35% floor -> the option must reach $0.91.
+        message = self._msg(1.40, 1.86)
+        self.assertIn("from $1.86 to $0.91", message)
+
+    def test_a_partial_gain_reads_as_banked_not_underwater(self):
+        message = self._msg(0.80, 0.64)
+        self.assertIn("has banked 20%", message)
+        self.assertNotIn("underwater", message)
+
+    def test_percentage_points_of_credit_are_gone(self):
+        # The old wording said "68% short of the 35% floor" - two percentages
+        # on different scales, one of them a subtraction the reader had to do.
+        message = self._msg(1.40, 1.86)
+        self.assertNotIn("68%", message)
+
+    def test_it_still_names_the_three_choices(self):
+        message = self._msg(1.40, 1.86)
+        for choice in ("Close", "roll out", "hold it deliberately"):
+            self.assertIn(choice, message)
+
+    def test_a_missing_credit_does_not_invent_a_target(self):
+        from wheelkit.risk import RiskLimits, check_position
+
+        exp = date.today() + timedelta(days=4)
+        findings = check_position(
+            symbol="X", right="P", strike=90.0, spot=100.0, expiration=exp,
+            dte=4, delta=-0.20, entry_credit=0.0, current_mid=0.50,
+            entry_date=date.today() - timedelta(days=5), limits=RiskLimits(),
+        )
+        self.assertIn("time_stop_unknown", {f.code for f in findings})

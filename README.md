@@ -273,6 +273,18 @@ Alerts on: a position going in the money, delta past 0.50, 50% of max profit
 captured, the last three days before expiry at a live delta, and a daily move
 over 5% in the underlying.
 
+The alert names two prices rather than a gap:
+
+```
+PLTR $160P is 33% underwater on its credit at the 4-DTE checkpoint (Sep 14).
+The floor is 35% banked - it would need to fall from $1.86 to $0.91 to clear
+it, with 4 DTE left. Close, roll out, or decide to hold it deliberately
+```
+
+It used to say *"68% short of the 35% floor"* — percentage points of the
+credit, a scale nobody carries in their head, and one that reads as though 68
+related to 35. Two real prices say the same thing without the arithmetic.
+
 **The checkpoint is asymmetric.** At 21 DTE a position that has captured less
 than 35% of its credit is raised for a decision — close, roll out, or hold it
 on purpose. One already past that threshold is working and stays silent. This
