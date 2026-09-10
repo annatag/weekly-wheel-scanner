@@ -342,6 +342,68 @@ def entry_date_for(
     )
 
 
+def best_match_in_archive(
+    symbol: str,
+    right: str,
+    strike: float,
+    expiration: date | None = None,
+    *,
+    directory: Path | None = None,
+) -> tuple[Suggestion, str, date | None] | None:
+    """Find a contract in the archived scans rather than the latest results.
+
+    `wheel_scan_results.csv` holds one run's top N and is overwritten by the
+    next, so a contract the scanner genuinely surfaced can be absent from it
+    an hour later - it ranked eleventh, or the run covered other symbols. And
+    `wheel_advise.py` writes no results file at all, so every trade found
+    through the deep-dive was condemned to `--no-scan` and excluded from
+    grading for want of a file to match against.
+
+    The archive holds every ranked candidate from every run, which is the
+    better record. Returns the most recent scan containing the contract.
+    """
+    from .archive import DEFAULT_ARCHIVE_DIR, read_archived_scans
+
+    rows = read_archived_scans(directory or DEFAULT_ARCHIVE_DIR)
+    right = right.upper()[:1]
+    symbol = symbol.upper()
+
+    candidates = []
+    for row in rows:
+        if (row.get("symbol") or "").upper() != symbol:
+            continue
+        if (row.get("right") or "P").upper()[:1] != right:
+            continue
+        row_expiry = _date(row.get("expiration", ""))
+        if expiration is not None and row_expiry != expiration:
+            continue
+        candidates.append((row, row_expiry))
+
+    if not candidates:
+        return None
+
+    # Most recent scan first, then the nearest strike within it.
+    candidates.sort(key=lambda pair: str(pair[0].get("scan_id", "")), reverse=True)
+    newest = str(candidates[0][0].get("scan_id", ""))
+    same_run = [c for c in candidates if str(c[0].get("scan_id", "")) == newest]
+    row, row_expiry = min(
+        same_run, key=lambda pair: abs(_float(pair[0].get("strike", "")) - strike)
+    )
+
+    suggestion = Suggestion(
+        symbol=symbol,
+        right=right,
+        expiration=row_expiry,
+        strike=_float(row.get("strike", "")),
+        mid=_float(row.get("mid", "")),
+        limit_likely=float("nan"),  # archived rows carry the quote, not the ladder
+        delta=_float(row.get("delta", "")),
+        dte=_float(row.get("dte", "")),
+        score=_float(row.get("score", "")),
+    )
+    return suggestion, newest, _date(row.get("scanned_on", ""))
+
+
 def scan_date_of(path: Path) -> date | None:
     """When a scan file was written. Used when no date is given explicitly."""
     try:
