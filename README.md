@@ -395,6 +395,18 @@ book. It said that once while six positions were open.
 `--source ibkr` refuses to fall back at all and errors instead, which is what
 you want when checking whether TWS is actually reachable.
 
+**Client ids retry.** TWS identifies each API client by a number and refuses a
+second connection on one already in use. A script that dies without
+disconnecting leaves its slot occupied until TWS restarts — and with a fixed
+id, every later run collides with the corpse, hangs to its timeout, and reports
+`TWS not reachable`. That is indistinguishable from TWS being closed, so the
+monitor reads zero positions on a live book. It happened.
+
+Each reader now starts from its own preferred id and falls through to random
+high ones if that is taken, so a stuck slot costs a few seconds rather than
+every run until you notice. Verified by squatting on the preferred id: the read
+still succeeded, in 6.2 seconds.
+
 ### Running it on a schedule
 
 ```bash

@@ -2557,3 +2557,76 @@ class TestPackOutputDir(unittest.TestCase):
                 output_dir=Path(self.dir.name) / "ignored"))
         self.assertTrue(target.exists())
         self.assertFalse((Path(self.dir.name) / "ignored").exists())
+
+
+class TestIbClientIdCollision(unittest.TestCase):
+    """A crashed run leaves its client id occupied until TWS restarts."""
+
+    def _fake_ib(self, fail_ids):
+        """An IB stand-in that refuses the given client ids, as TWS does."""
+        attempts = []
+
+        class FakeIB:
+            def connect(self, host, port, clientId, readonly, timeout):
+                attempts.append(clientId)
+                if clientId in fail_ids:
+                    raise TimeoutError("client id already in use")
+
+            def disconnect(self):
+                pass
+
+        return FakeIB, attempts
+
+    def _patch(self, FakeIB):
+        from unittest.mock import patch
+
+        import ib_async
+
+        return patch.object(ib_async, "IB", FakeIB)
+
+    def test_a_free_preferred_id_is_used_first(self):
+        from wheelkit.positions import IB_CLIENT_IDS, connect_ib
+
+        FakeIB, attempts = self._fake_ib(fail_ids=set())
+        with self._patch(FakeIB):
+            connect_ib("127.0.0.1", 7497, "positions")
+        self.assertEqual(attempts, [IB_CLIENT_IDS["positions"]])
+
+    def test_a_stuck_id_falls_through_to_another(self):
+        # The reported failure: clientId 24 occupied by a dead process, every
+        # later run hanging and reporting "TWS not reachable".
+        from wheelkit.positions import IB_CLIENT_IDS, connect_ib
+
+        FakeIB, attempts = self._fake_ib(fail_ids={IB_CLIENT_IDS["positions"]})
+        with self._patch(FakeIB):
+            connect_ib("127.0.0.1", 7497, "positions")
+        self.assertEqual(attempts[0], IB_CLIENT_IDS["positions"])
+        self.assertGreater(len(attempts), 1)
+        self.assertNotIn(attempts[-1], {IB_CLIENT_IDS["positions"]})
+
+    def test_the_retries_are_outside_the_range_a_person_would_pick(self):
+        from wheelkit.positions import IB_CLIENT_IDS, IB_RETRY_RANGE, connect_ib
+
+        FakeIB, attempts = self._fake_ib(fail_ids={IB_CLIENT_IDS["positions"]})
+        with self._patch(FakeIB):
+            connect_ib("127.0.0.1", 7497, "positions")
+        for client_id in attempts[1:]:
+            self.assertGreaterEqual(client_id, IB_RETRY_RANGE[0])
+            self.assertLessEqual(client_id, IB_RETRY_RANGE[1])
+
+    def test_exhausting_every_id_raises_the_error_callers_handle(self):
+        # Callers already treat FetchError as "fall back to the next source".
+        from wheelkit.netio import FetchError
+        from wheelkit.positions import IB_ATTEMPTS, connect_ib
+
+        FakeIB, attempts = self._fake_ib(fail_ids=set(range(0, 10_000)))
+        with self._patch(FakeIB):
+            with self.assertRaises(FetchError):
+                connect_ib("127.0.0.1", 7497, "positions")
+        self.assertEqual(len(attempts), IB_ATTEMPTS)
+
+    def test_each_purpose_starts_from_its_own_id(self):
+        # Four readers running back to back should not collide with each other.
+        from wheelkit.positions import IB_CLIENT_IDS
+
+        self.assertEqual(len(set(IB_CLIENT_IDS.values())), len(IB_CLIENT_IDS))
