@@ -30,6 +30,7 @@ from wheelkit.report import (
     print_underlying_summary,
     render_table,
 )
+from wheelkit.restricted import load_crypto_fund_symbols
 from wheelkit.strategy import Candidate, WheelConfig, build_candidates
 
 # Delta rungs shown in the ladder, from conservative to aggressive.
@@ -250,6 +251,12 @@ def main() -> int:
     print("=" * 74)
     print(f"WHEEL ADVISOR — {symbol}")
     print("=" * 74)
+    restricted, _ = load_crypto_fund_symbols(provider)
+    if symbol in restricted:
+        print(f"⚠ {symbol} is a crypto fund. This account has no permission to "
+              "trade it —")
+        print("  the numbers below are for reference only; an order would be "
+              "refused.")
     print_context(context)
     print_underlying_summary(symbol, stats, earnings.next_date(symbol))
 

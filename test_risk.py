@@ -2843,3 +2843,117 @@ class TestRecordFallsBackToTheArchive(unittest.TestCase):
         found = best_match_in_archive("BX", "P", 118.4, _date(2026, 9, 18),
                                       directory=self.root / "archive")
         self.assertAlmostEqual(found[0].strike, 118.0)
+
+
+class TestCryptoFundRestriction(unittest.TestCase):
+    """The account cannot trade funds that hold crypto; nothing may offer them.
+
+    A scan on 2026-09-14 ranked IBIT fifth and ETHA sixth. The rule has to
+    catch the funds without catching the crypto companies, which trade fine.
+    """
+
+    FUNDS = {
+        "ETHA": "iShares Ethereum Trust ETF Shares",
+        "IBIT": "iShares Bitcoin Trust ETF Shares",
+        "FBTC": "Fidelity Wise Origin Bitcoin Fund",
+        "BITO": "ProShares Bitcoin ETF",
+        "EETH": "ProShares Ether ETF",
+        "XRP": "Bitwise XRP ETF",
+        "GDOG": "Grayscale Dogecoin Trust ETF",
+        "BTCI": "NEOS Bitcoin High Income ETF",
+        "SPBC": "Simplify Exchange Traded Funds Simplify US Equity PLUS "
+                "Bitcoin Strategy ETF",
+        "NCIQ": "Hashdex Nasdaq CME Crypto Index ETF Shares of Beneficial Interest",
+        # Blockchain stocks plus bitcoin futures: the futures are the problem.
+        "BITS": "Global X Funds Global X Blockchain & Bitcoin Strategy ETF",
+    }
+    EQUITIES = {
+        "COIN": "Coinbase Global, Inc. Class A Common Stock",
+        "ABTC": "American Bitcoin Corp. Class A Common Stock",
+        "HSDT": "Solana Company Class A Common Stock (DE)",
+        "WGMI": "CoinShares ETF Trust CoinShares Bitcoin Mining and Digital "
+                "Power ETF",
+        "MNRS": "Grayscale Bitcoin Miners ETF",
+        "BITQ": "Bitwise Crypto Industry Innovators ETF",
+        "CEPI": "ETF Opportunities Trust REX Crypto Equity Premium Income ETF",
+        "STCE": "Schwab Crypto Thematic Natural Language Processing ETF",
+        "BLOK": "Amplify Blockchain Technology ETF",
+        "GDX": "VanEck Gold Miners ETF",
+        # "Ether" needs its word boundary.
+        "ETD": "Ethan Allen Interiors Inc. Common Stock",
+    }
+
+    def test_funds_holding_crypto_are_restricted(self):
+        from wheelkit.restricted import is_crypto_fund
+
+        for symbol, name in self.FUNDS.items():
+            self.assertTrue(is_crypto_fund(name), symbol)
+
+    def test_crypto_companies_and_equity_funds_are_not(self):
+        from wheelkit.restricted import is_crypto_fund
+
+        for symbol, name in self.EQUITIES.items():
+            self.assertFalse(is_crypto_fund(name), symbol)
+
+    def test_snapshot_holds_the_funds_that_reached_the_top_ten(self):
+        from wheelkit.restricted import KNOWN_CRYPTO_FUNDS
+
+        for symbol in ("ETHA", "IBIT", "FBTC", "BITO", "GBTC"):
+            self.assertIn(symbol, KNOWN_CRYPTO_FUNDS)
+        for symbol in ("COIN", "MSTR", "MARA", "BMNR", "HOOD"):
+            self.assertNotIn(symbol, KNOWN_CRYPTO_FUNDS)
+
+    def test_live_names_catch_funds_the_snapshot_predates(self):
+        from wheelkit.restricted import crypto_fund_symbols
+
+        found = crypto_fund_symbols([
+            {"symbol": "NEWE", "name": "Acme Ethereum Trust ETF"},
+            {"symbol": "NVDA", "name": "NVIDIA Corporation Common Stock"},
+        ])
+        self.assertIn("NEWE", found)
+        self.assertIn("ETHA", found)
+        self.assertNotIn("NVDA", found)
+
+    def test_split_keeps_order_and_names_what_it_dropped(self):
+        from wheelkit.restricted import KNOWN_CRYPTO_FUNDS, split_restricted
+
+        kept, dropped = split_restricted(
+            ["NVDA", "etha", "GDX", "IBIT"], KNOWN_CRYPTO_FUNDS
+        )
+        self.assertEqual(kept, ["NVDA", "GDX"])
+        self.assertEqual(dropped, ["ETHA", "IBIT"])
+
+    def test_load_falls_back_to_the_snapshot(self):
+        from wheelkit.restricted import KNOWN_CRYPTO_FUNDS, load_crypto_fund_symbols
+
+        self.assertEqual(load_crypto_fund_symbols(None), (KNOWN_CRYPTO_FUNDS, False))
+
+        class Unreachable:
+            @property
+            def _headers(self):
+                raise RuntimeError("no network")
+
+        restricted, live = load_crypto_fund_symbols(Unreachable())
+        self.assertFalse(live)
+        self.assertIn("ETHA", restricted)
+
+    def _assets(self):
+        return [{"symbol": s, "name": self.FUNDS[s]} for s in ("ETHA", "IBIT")] + \
+               [{"symbol": s, "name": self.EQUITIES[s]} for s in ("COIN", "GDX")]
+
+    def test_universe_build_rejects_them_before_pricing(self):
+        from wheelkit.restricted import NOT_PERMITTED
+        from wheelkit.universe import ScreenReport, UniverseFilters, prefilter_assets
+
+        report = ScreenReport()
+        kept = prefilter_assets(self._assets(), UniverseFilters(), report)
+        self.assertEqual([a["symbol"] for a in kept], ["COIN", "GDX"])
+        self.assertEqual(report.rejected.get(NOT_PERMITTED), 2)
+
+    def test_universe_build_keeps_them_when_permitted(self):
+        from wheelkit.universe import ScreenReport, UniverseFilters, prefilter_assets
+
+        kept = prefilter_assets(
+            self._assets(), UniverseFilters(exclude_crypto_funds=False), ScreenReport()
+        )
+        self.assertEqual(len(kept), 4)

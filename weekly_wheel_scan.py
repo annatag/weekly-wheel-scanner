@@ -29,6 +29,7 @@ from wheelkit.report import (
     print_trade_card,
     write_csv,
 )
+from wheelkit.restricted import load_crypto_fund_symbols, split_restricted
 from wheelkit.strategy import WheelConfig
 from wheelkit.universe import (
     DEFAULT_UNIVERSE_PATH,
@@ -115,6 +116,9 @@ def parse_args() -> argparse.Namespace:
                         "screen can be evaluated later")
     p.add_argument("--no-archive", action="store_true",
                    help="Do not record this run")
+    p.add_argument("--allow-crypto-funds", action="store_true",
+                   help="Scan funds that hold crypto (ETHA, IBIT, BITO...). "
+                        "Excluded by default: this account cannot trade them.")
     p.add_argument("--quiet", action="store_true")
     return p.parse_args()
 
@@ -307,6 +311,23 @@ def main() -> int:
             return 1
         positions = coverable
         symbols = sorted(positions)
+
+    if not args.allow_crypto_funds:
+        # Filtered here rather than only at universe build, because symbols
+        # also arrive from --symbols, a Finviz screen, or a universe file
+        # built before the rule existed - which is how ETHA reached #6.
+        restricted, live = load_crypto_fund_symbols(provider)
+        symbols, dropped = split_restricted(symbols, restricted)
+        if dropped:
+            print(f"Excluded {len(dropped)} crypto fund(s) this account cannot "
+                  f"trade: {', '.join(dropped)}")
+            if not live:
+                print("  (asset names unavailable - used the built-in list, "
+                      "which can miss newly launched funds)")
+        if not symbols:
+            print("Nothing left to scan once crypto funds are excluded.",
+                  file=sys.stderr)
+            return 1
 
     print(f"Scanning {len(symbols)} symbol(s) for "
           f"{'short puts' if right == 'P' else 'covered calls'} "

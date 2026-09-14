@@ -55,6 +55,9 @@ def parse_args() -> argparse.Namespace:
                    help="Drop names too quiet to pay premium (e.g. SGOV)")
     p.add_argument("--include-leveraged", action="store_true",
                    help="Do not exclude 2x/3x/inverse products (not advised)")
+    p.add_argument("--include-crypto-funds", action="store_true",
+                   help="Keep funds that hold crypto (ETHA, IBIT, BITO...). "
+                        "Excluded by default: this account cannot trade them.")
     p.add_argument("--dry-run", action="store_true",
                    help="Print the result without writing the file")
     p.add_argument("--show", type=int, default=25,
@@ -71,6 +74,7 @@ def main() -> int:
         min_realised_vol=args.min_realised_vol,
         max_symbols=args.max_symbols,
         exclude_leveraged=not args.include_leveraged,
+        exclude_crypto_funds=not args.include_crypto_funds,
     )
 
     try:
