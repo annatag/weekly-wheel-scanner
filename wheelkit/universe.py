@@ -22,6 +22,7 @@ from pathlib import Path
 
 from .netio import FetchError, get_json
 from .providers import ALPACA_DATA_URL, ALPACA_TRADE_URL, AlpacaProvider
+from .restricted import NOT_PERMITTED, is_crypto_fund
 
 # Alpaca caps the multi-symbol endpoints well above this, but large batches
 # make one slow symbol stall the whole request and complicate retries.
@@ -77,6 +78,9 @@ class UniverseFilters:
     max_symbols: int = 400
     exclude_leveraged: bool = True
     exclude_structured: bool = True
+    # The account cannot trade funds that hold crypto, so they would only
+    # take slots from names it can. See wheelkit/restricted.py.
+    exclude_crypto_funds: bool = True
     allow_etfs: bool = True
 
 
@@ -163,6 +167,9 @@ def prefilter_assets(assets: list[dict], filters: UniverseFilters,
             continue
         if filters.exclude_structured and EXCLUDE_NAME_PATTERNS.search(name):
             report.reject("structured product or shell")
+            continue
+        if filters.exclude_crypto_funds and is_crypto_fund(name):
+            report.reject(NOT_PERMITTED)
             continue
         kept.append(asset)
     return kept

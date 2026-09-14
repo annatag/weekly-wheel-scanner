@@ -34,6 +34,7 @@ from wheelkit.positions import (
 )
 from wheelkit.pricing import compute_greeks, implied_vol
 from wheelkit.providers import AlpacaProvider
+from wheelkit.restricted import load_crypto_fund_symbols
 from wheelkit.report import fmt_num, render_table
 from wheelkit.risk import (
     URGENT,
@@ -89,6 +90,10 @@ def parse_args() -> argparse.Namespace:
                    help="Fill log, used for entry dates the broker does not "
                         "report. Without one the checkpoint falls back to a "
                         "flat DTE, which is early for a short-dated trade.")
+    p.add_argument(
+        "--allow-crypto-funds", action="store_true",
+        help="Do not block funds that hold crypto in --check",
+    )
     p.add_argument(
         "--check", nargs=5, metavar=("SYMBOL", "STRIKE", "RIGHT", "EXPIRY", "CREDIT"),
         help="Validate a trade before placing it, e.g. --check GM 87 P 2026-08-21 1.09",
@@ -227,6 +232,14 @@ def run_check(args: argparse.Namespace, provider: AlpacaProvider,
         setup=stats.setup, earnings_date=earnings.next_date(symbol),
         expiration=expiration, limits=limits,
     )
+    if not args.allow_crypto_funds:
+        restricted, _ = load_crypto_fund_symbols(provider)
+        if symbol in restricted:
+            findings.insert(0, Finding(
+                URGENT, "not_permitted",
+                f"{symbol} is a crypto fund - this account has no permission "
+                "to trade it, so the broker would refuse the order",
+            ))
 
     sizing = size_position(
         strike=strike, spot=spot, iv=iv or stats.rv20, dte=dte, limits=limits

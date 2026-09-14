@@ -54,7 +54,7 @@ rather than by product, so daily bars use `sip` (full consolidated volume)
 while live quotes use `iex`, and options use the `indicative` feed. No paid
 subscription is required.
 
-Run the offline tests — 113 of them, no network — with:
+Run the offline tests — no network needed — with:
 
 ```bash
 python -m unittest test_wheelkit test_risk
@@ -467,12 +467,32 @@ match the position monitor's daily-move alert.
 `./scripts/install_monitor.sh` still installs only the position monitor, if
 that is all you want. Both installers are safe to re-run.
 
+## Crypto funds are excluded
+
+This account has no permission to trade funds that hold crypto — spot trusts
+such as ETHA, IBIT and FBTC, futures funds such as BITO, and the income and
+overlay funds built on them. Before this rule, a scan ranked IBIT fifth and
+ETHA sixth: two of the top ten were orders the broker would refuse.
+
+They are dropped at every entry point: the universe build, the scan (whatever
+the symbols came from — universe file, `--symbols` or a Finviz screen), the
+`--check` gate, which reports them as BLOCKED, and the advisor, which warns.
+
+What counts is the holding, not the theme. Coinbase, Strategy, the bitcoin
+miners and blockchain-industry equity ETFs hold ordinary shares and stay in.
+The test is the fund's registered name; see `wheelkit/restricted.py`.
+
+If the permission is ever granted, `--include-crypto-funds` on
+`build_universe.py` and `--allow-crypto-funds` on the scanner and on
+`wheel_positions.py` turn the exclusion off.
+
 ## Command reference
 
 ### `build_universe.py` — what to scan
 
 Pulls every optionable US equity from Alpaca, screens on price and real
-consolidated dollar volume, drops leveraged and inverse products, and writes
+consolidated dollar volume, drops leveraged and inverse products and funds that
+hold crypto, and writes
 the survivors to `universe/symbols.txt`. Run it weekly or monthly, not daily.
 
 **You do not have to run it first.** The scanner builds the universe itself
